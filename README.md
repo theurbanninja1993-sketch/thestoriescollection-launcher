@@ -26,6 +26,9 @@ spending an evening on it rather than after.
 - Launches whatever is already built, per the paths in `launcher.ini`.
 - A game marked `available=0` is dimmed, marked `COMING SOON!`, and will not
   launch.
+- **Each card can carry its own theme music**, from `music/`. It starts from the
+  opening when a card is picked, fades in and out rather than cutting, swaps
+  smoothly when you move between the two, and loops. `M` mutes.
 
 ## What is coming
 
@@ -50,11 +53,17 @@ raylib is fetched automatically. There are no other dependencies.
 ## Configuring
 
 Everything lives in `launcher.ini` next to the executable — the games, their
-paths, their box art and whether they are available. See the comments in the
-file; the one thing to change first is the paths, which start out pointing at
-this machine's development builds.
+paths, their box art, their theme music and whether they are available. See the
+comments in the file; the one thing to change first is the paths, which start out
+pointing at this machine's development builds.
 
-Box art goes in `art/` — see `art/README.txt`.
+Box art goes in `art/` — see `art/README.txt`. Theme music goes in `music/` — see
+`music/README.txt`. **Neither is shipped**: the covers and the themes are
+Rockstar's, so those are the two things the launcher asks you to supply yourself.
+A game with no theme is simply quiet — it is never an error.
+
+`[launcher] music_volume` sets how loud the themes are, 0 to 1. Set it to 0 to
+turn menu music off entirely.
 
 ## Handy flags
 
@@ -65,8 +74,9 @@ Box art goes in `art/` — see `art/README.txt`.
 
 ## Layout
 
-    launcher.ini        the games, their paths and their state
+    launcher.ini        the games, their paths, their themes and their state
     art/                box art (supplied by you)
+    music/              theme music (supplied by you)
     src/main.cpp        the menu
     games/              (release layout) one folder per game, beside the launcher
 

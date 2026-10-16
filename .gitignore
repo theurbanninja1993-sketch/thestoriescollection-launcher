@@ -5,4 +5,9 @@ imgui.ini
 *.dll
 *.exe
 art/*.png
+# theme music: Rockstar's, supplied by the player, never redistributed
+music/*.mp3
+music/*.ogg
+music/*.wav
+music/*.qoa
 /*.png

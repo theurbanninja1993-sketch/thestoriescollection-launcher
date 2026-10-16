@@ -3,7 +3,8 @@
 // Phase 1: the game menu. Two cards with the player's own box art, mouse and
 // controller navigation, click / Cross to launch. The games and their paths come
 // from launcher.ini next to the executable, so nothing is hard-coded and a game
-// marked available=0 shows a COMING SOON notice instead of launching.
+// marked available=0 shows a COMING SOON notice instead of launching. Each card
+// can also carry its own theme music from music/, played while it is highlighted.
 //
 // The menu is drawn directly with raylib (no ImGui yet); the builder wizard in
 // phase 2 is where forms and widgets will actually earn their keep.
@@ -88,14 +89,25 @@ namespace
         std::string exe;   // the port's runner; relative paths resolve beside the launcher
         std::string data;  // disc image or extracted folder, passed to the game
         std::string art;   // box art png
+        std::string music; // theme audio, played while this card is highlighted
+        bool musicNamed = false; // whether the config named the file, for warnings
         bool available = true;
         Texture2D artTexture{};
         bool artLoaded = false;
+        Music theme{};           // the loaded theme, if there was one
+        bool themeLoaded = false;
+        float themeVolume = 0.0f; // eased 0..1 of the configured music volume
+    };
+
+    // Launcher-wide settings, from the [launcher] section.
+    struct Settings
+    {
+        float musicVolume = 0.6f; // 0 turns menu music off entirely
     };
 
     // A deliberately small key=value reader: one "[game:<id>]" section per game,
     // in file order, so the menu order is whatever the file says.
-    std::vector<Game> loadGames(const std::string &path)
+    std::vector<Game> loadGames(const std::string &path, Settings &settings)
     {
         std::vector<Game> games;
         FILE *file = std::fopen(path.c_str(), "rb");
@@ -107,6 +119,7 @@ namespace
 
         char line[1024];
         Game *current = nullptr;
+        bool inLauncher = false;
         while (std::fgets(line, sizeof line, file) != nullptr)
         {
             std::string text = trim(line);
@@ -114,6 +127,7 @@ namespace
                 continue;
             if (text.front() == '[' && text.back() == ']')
             {
+                inLauncher = text == "[launcher]";
                 if (text.rfind("[game:", 0) != 0)
                 {
                     current = nullptr;
@@ -126,13 +140,19 @@ namespace
                     current->title = current->id;
                 continue;
             }
-            if (current == nullptr)
-                continue;
             const size_t equals = text.find('=');
             if (equals == std::string::npos)
                 continue;
             const std::string key = trim(text.substr(0, equals));
             const std::string value = trim(text.substr(equals + 1));
+            if (inLauncher)
+            {
+                if (key == "music_volume")
+                    settings.musicVolume = static_cast<float>(std::atof(value.c_str()));
+                continue;
+            }
+            if (current == nullptr)
+                continue;
             if (key == "title")
                 current->title = value;
             else if (key == "exe")
@@ -141,11 +161,41 @@ namespace
                 current->data = value;
             else if (key == "art")
                 current->art = value;
+            else if (key == "music")
+                current->music = value;
             else if (key == "available")
                 current->available = std::atoi(value.c_str()) != 0;
         }
         std::fclose(file);
         return games;
+    }
+
+    // ---------------------------------------------------------------- music
+
+    // A theme starts from its opening rather than resuming mid-track, so hovering
+    // a card always plays the part that identifies it.
+    void startTheme(Game &game)
+    {
+        if (!game.themeLoaded)
+            return;
+        StopMusicStream(game.theme); // also rewinds to the beginning
+        PlayMusicStream(game.theme);
+        SetMusicVolume(game.theme, game.themeVolume);
+    }
+
+    // The game brings its own music, so none of ours may play over it. Everything
+    // is stopped first: the audio thread would otherwise keep feeding the buffer
+    // while the launcher is blocked in the launch.
+    void silenceThemes(std::vector<Game> &games)
+    {
+        for (Game &game : games)
+        {
+            if (!game.themeLoaded)
+                continue;
+            game.themeVolume = 0.0f;
+            SetMusicVolume(game.theme, 0.0f);
+            StopMusicStream(game.theme);
+        }
     }
 
     // ---------------------------------------------------------------- launch
@@ -178,6 +228,7 @@ namespace
     constexpr float kArtWidth = 300.0f;
     constexpr float kArtHeight = 420.0f; // a PS2 cover is roughly 1:1.4
     constexpr float kGap = 90.0f;
+    constexpr float kMusicFadeSpeed = 3.0f; // how fast a theme swells in or out
 
     bool pointIn(const Rectangle &rect, Vector2 point)
     {
@@ -241,7 +292,8 @@ int main(int argc, char **argv)
     // itself, so the whole folder can be moved anywhere as one unit.
     const std::string base = directoryOf(configPath);
 
-    std::vector<Game> games = loadGames(configPath);
+    Settings settings;
+    std::vector<Game> games = loadGames(configPath, settings);
     if (games.empty())
     {
         std::fprintf(stderr, "[launcher] no games configured in %s\n", configPath.c_str());
@@ -276,6 +328,11 @@ int main(int argc, char **argv)
     {
         game.exe = resolve(base, game.exe);
         game.data = resolve(base, game.data);
+        // The theme is optional. When the config does not name one, music/<id>.mp3
+        // is what a drop-in would be called, so dropping the file in with the right
+        // name needs no edit at all.
+        game.musicNamed = !game.music.empty();
+        game.music = resolve(base, game.musicNamed ? game.music : ("music/" + game.id + ".mp3"));
     }
 
     // --launch skips the menu entirely, so a desktop shortcut can start a game
@@ -310,10 +367,60 @@ int main(int argc, char **argv)
         }
     }
 
+    // ------------------------------------------------------------ menu music
+    // Each theme is the player's own file, like the box art: nothing is shipped.
+    // A missing one is not an error, it just makes the menu quieter.
+    const float musicVolume = std::max(0.0f, std::min(1.0f, settings.musicVolume));
+    bool audioReady = false;
+    int themesLoaded = 0;
+    if (musicVolume > 0.0f)
+    {
+        InitAudioDevice();
+        audioReady = IsAudioDeviceReady();
+        if (!audioReady)
+            std::fprintf(stderr, "[launcher] no audio device: the menu will be silent\n");
+    }
+    else
+    {
+        std::fprintf(stderr, "[launcher] menu music off (music_volume=0)\n");
+    }
+
+    for (Game &game : games)
+    {
+        if (!audioReady)
+            break;
+        if (!FileExists(game.music.c_str()))
+        {
+            // Only worth mentioning when the config asked for it by name; the
+            // guess at music/<id>.mp3 being absent is the normal, quiet case.
+            if (game.musicNamed)
+                std::fprintf(stderr, "[launcher] music: %s: %s not found\n", game.id.c_str(), game.music.c_str());
+            continue;
+        }
+        game.theme = LoadMusicStream(game.music.c_str());
+        game.themeLoaded = IsMusicValid(game.theme);
+        if (!game.themeLoaded)
+        {
+            std::fprintf(stderr, "[launcher] music: %s: %s would not decode\n", game.id.c_str(), game.music.c_str());
+            continue;
+        }
+        game.theme.looping = true;
+        SetMusicVolume(game.theme, 0.0f);
+        ++themesLoaded;
+        const float seconds = GetMusicTimeLength(game.theme);
+        std::fprintf(stderr, "[launcher] music: %s <- %s (%d:%02d, loops)\n", game.id.c_str(), game.music.c_str(),
+                     static_cast<int>(seconds) / 60, static_cast<int>(seconds) % 60);
+    }
+
     int selected = startSelection >= 0 && startSelection < static_cast<int>(games.size()) ? startSelection : 0;
     std::vector<Card> cards(games.size());
     // Open with the selection already shown rather than fading in from nothing.
     cards[selected].highlight = 1.0f;
+
+    // The theme follows the highlighted card. -1 so the first frame starts the
+    // opening selection's theme: the menu has music the moment it appears.
+    int previousSelected = -1;
+    bool musicMuted = false;
 
     // A mouse that is merely *resting* over a card must not keep stealing the
     // selection from the keyboard or the controller, so hovering only counts
@@ -391,10 +498,49 @@ int main(int argc, char **argv)
             const float target = isSelected ? 1.0f : 0.0f;
             cards[i].highlight += (target - cards[i].highlight) * std::min(1.0f, delta * 12.0f);
             cards[i].scale = 1.0f + cards[i].highlight * 0.04f;
+
+            // The theme swells in with the highlight and fades out the same way,
+            // so a hover never cuts to silence.
+            Game &game = games[i];
+            if (!game.themeLoaded)
+                continue;
+            const float musicTarget = (isSelected && !musicMuted) ? musicVolume : 0.0f;
+            game.themeVolume += (musicTarget - game.themeVolume) * std::min(1.0f, delta * kMusicFadeSpeed);
+            if (musicTarget == 0.0f && game.themeVolume < 0.001f)
+            {
+                game.themeVolume = 0.0f;
+                // Nothing left to hear: stop and rewind it, and leave it stopped,
+                // so a theme nobody is hovering costs nothing at all.
+                if (IsMusicStreamPlaying(game.theme))
+                    StopMusicStream(game.theme);
+            }
+            SetMusicVolume(game.theme, game.themeVolume);
+            UpdateMusicStream(game.theme);
+        }
+
+        // ---------------------------------------------------------- music
+        if (IsKeyPressed(KEY_M) && themesLoaded > 0)
+        {
+            musicMuted = !musicMuted;
+            if (!musicMuted)
+                startTheme(games[selected]); // silent until the fade brings it up
+        }
+        // Hovering the other card swaps the theme: the new one starts from its
+        // opening, the old one fades away and is stopped once it is inaudible.
+        if (selected != previousSelected)
+        {
+            if (!musicMuted)
+                startTheme(games[selected]);
+            previousSelected = selected;
         }
 
         if (activate && games[selected].available)
+        {
+            silenceThemes(games);
             launchGame(games[selected]);
+            if (!musicMuted)
+                startTheme(games[selected]);
+        }
 
         // ---------------------------------------------------------- draw
         BeginDrawing();
@@ -511,12 +657,24 @@ int main(int argc, char **argv)
         }
 
         // Footer: how to drive it.
-        const char *footer = games[selected].available
-                                 ? "Left / Right or the stick to choose    -    Click or Cross to play    -    Esc to quit"
-                                 : "Left / Right or the stick to choose    -    this one is still being built";
-        const float footerWidth = static_cast<float>(MeasureText(footer, 18));
-        DrawText(footer, static_cast<int>((width - footerWidth) * 0.5f), static_cast<int>(height - 46.0f), 18,
+        std::string footer = "Left / Right or the stick to choose    -    ";
+        footer += games[selected].available ? "Click or Cross to play" : "this one is still being built";
+        if (themesLoaded > 0)
+            footer += musicMuted ? "    -    M: music off" : "    -    M: mute";
+        footer += "    -    Esc to quit";
+        const float footerWidth = static_cast<float>(MeasureText(footer.c_str(), 18));
+        DrawText(footer.c_str(), static_cast<int>((width - footerWidth) * 0.5f), static_cast<int>(height - 46.0f), 18,
                  (Color){120, 130, 150, 255});
+
+        // Nothing in music/ yet: say where a theme would go. It disappears for
+        // good the moment there is one, so it teaches without ever nagging.
+        if (audioReady && themesLoaded == 0)
+        {
+            const char *hint = "each game's theme can play here - drop an mp3 into music/ (see music/README.txt)";
+            const float hintWidth = static_cast<float>(MeasureText(hint, 16));
+            DrawText(hint, static_cast<int>((width - hintWidth) * 0.5f), static_cast<int>(height - 22.0f), 16,
+                     (Color){84, 92, 110, 255});
+        }
 
         EndDrawing();
 
@@ -531,8 +689,14 @@ int main(int argc, char **argv)
     }
 
     for (Game &game : games)
+    {
+        if (game.themeLoaded)
+            UnloadMusicStream(game.theme);
         if (game.artLoaded)
             UnloadTexture(game.artTexture);
+    }
+    if (audioReady)
+        CloseAudioDevice(); // raylib wants the audio device closed before the window
     CloseWindow();
     return 0;
 }

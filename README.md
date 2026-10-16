@@ -73,3 +73,12 @@ Box art goes in `art/` — see `art/README.txt`.
 A release is a folder the player can move anywhere: the launcher, `launcher.ini`
 and the `games/` folders travel together, and relative paths in the config
 resolve beside the executable.
+
+## Licence
+
+GPL-3.0 — the full text is in `LICENSE`. The same licence as the port it
+launches, so the whole project is under one licence.
+
+The box art in `art/` is yours, not part of this repository, and is not covered
+by it. Neither is the game itself: the launcher only starts a build you made
+from your own disc.

@@ -124,6 +124,17 @@ A release is a folder the player can move anywhere: the launcher, `launcher.ini`
 and the `games/` folders travel together, and relative paths in the config
 resolve beside the executable.
 
+## Not affiliated
+
+Not affiliated with, endorsed by, or connected to Rockstar Games or Take-Two
+Interactive. This is a fan tool, and its name is descriptive rather than a
+product name.
+
+It holds no game code and no game data of any kind. The games it launches are
+recompiled on your own machine from your own discs, and the box art and theme
+music it can use are yours to supply — see `art/README.txt` and
+`music/README.txt`.
+
 ## Licence
 
 GPL-3.0 — the full text is in `LICENSE`. The same licence as the port it

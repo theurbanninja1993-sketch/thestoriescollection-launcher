@@ -511,7 +511,7 @@ int main(int argc, char **argv)
     }
 
     SetConfigFlags(FLAG_WINDOW_HIGHDPI | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
-    InitWindow(1280, 720, "GTA PS2 - Launcher");
+    InitWindow(1280, 720, "The Stories Collection - Launcher");
     SetTargetFPS(60);
     SetExitKey(KEY_NULL);
     // Fullscreen by default: this is a front end meant to sit on the screen like a
@@ -912,11 +912,14 @@ int main(int argc, char **argv)
                                    (Color){24, 27, 36, 255}, (Color){14, 15, 20, 255});
         }
 
-        const char *heading = "GRAND THEFT AUTO:";
+        // The title is descriptive and carries no mark of its own: it says what
+        // this is and what it launches, and nothing more. The games are named on
+        // their own cards, which is the only place their names are needed.
+        const char *heading = "THE STORIES COLLECTION";
         const float headingWidth = static_cast<float>(MeasureText(heading, px(44)));
         DrawText(heading, static_cast<int>((width - headingWidth) * 0.5f), static_cast<int>(artY - 100.0f * s), px(44),
                  (Color){236, 240, 248, 255});
-        const char *subheading = "The Stories Collection";
+        const char *subheading = "PlayStation 2 recompilations";
         const float subheadingWidth = static_cast<float>(MeasureText(subheading, px(28)));
         DrawText(subheading, static_cast<int>((width - subheadingWidth) * 0.5f), static_cast<int>(artY - 48.0f * s),
                  px(28), (Color){240, 200, 90, 255});

@@ -11,11 +11,13 @@
 #include "raylib.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if defined(PS2X_LAUNCHER_WINDOWS)
@@ -103,6 +105,7 @@ namespace
     struct Settings
     {
         float musicVolume = 0.6f; // 0 turns menu music off entirely
+        bool fullscreen = true;   // a front end is meant to sit on the screen
     };
 
     // A deliberately small key=value reader: one "[game:<id>]" section per game,
@@ -149,6 +152,8 @@ namespace
             {
                 if (key == "music_volume")
                     settings.musicVolume = static_cast<float>(std::atof(value.c_str()));
+                else if (key == "fullscreen")
+                    settings.fullscreen = std::atoi(value.c_str()) != 0;
                 continue;
             }
             if (current == nullptr)
@@ -200,20 +205,24 @@ namespace
 
     // ---------------------------------------------------------------- launch
 
-    void launchGame(const Game &game)
+    // The shell handles the quoting on both platforms (cmd and sh both accept &&
+    // and double quotes), and the game is run from its own folder so a portable
+    // config next to it is the one it reads.
+    //
+    // PS2X_LAUNCHED_FROM_LAUNCHER is what lets the game's settings say "Return to
+    // game select" instead of "Quit to desktop" - which is what actually happens.
+    std::string launchCommand(const Game &game)
     {
-        const std::string exe = game.exe;
-        const std::string workingDirectory = directoryOf(exe);
-        // The shell handles the quoting on both platforms (cmd and sh both
-        // accept && and double quotes), and the game wants to be run from its
-        // own folder so a portable config next to it is the one it reads.
-        std::string command = "cd \"" + workingDirectory + "\" && \"" + exe + "\"";
+#if defined(PS2X_LAUNCHER_WINDOWS)
+        std::string command =
+            "set PS2X_LAUNCHED_FROM_LAUNCHER=1 && cd /d \"" + directoryOf(game.exe) + "\"";
+#else
+        std::string command = "export PS2X_LAUNCHED_FROM_LAUNCHER=1; cd \"" + directoryOf(game.exe) + "\"";
+#endif
+        command += " && \"" + game.exe + "\"";
         if (!game.data.empty())
             command += " \"" + game.data + "\"";
-        std::fprintf(stderr, "[launcher] %s\n", command.c_str());
-        const int status = std::system(command.c_str());
-        if (status != 0)
-            std::fprintf(stderr, "[launcher] %s exited with status %d\n", game.id.c_str(), status);
+        return command;
     }
 
     // ---------------------------------------------------------------- layout
@@ -344,14 +353,24 @@ int main(int argc, char **argv)
             std::fprintf(stderr, "[launcher] %s is not available yet\n", games[launchIndex].id.c_str());
             return 1;
         }
-        launchGame(games[launchIndex]);
-        return 0;
+        const std::string command = launchCommand(games[launchIndex]);
+        std::fprintf(stderr, "[launcher] %s\n", command.c_str());
+        return std::system(command.c_str()) == 0 ? 0 : 1;
     }
 
     SetConfigFlags(FLAG_WINDOW_HIGHDPI | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
     InitWindow(1280, 720, "GTA PS2 - Launcher");
     SetTargetFPS(60);
     SetExitKey(KEY_NULL);
+    // Fullscreen by default: this is a front end meant to sit on the screen like a
+    // console menu. F11 swaps at any time, and --screenshot always stays windowed
+    // so a capture is the same size whatever the display.
+    if (settings.fullscreen && screenshotPath.empty())
+    {
+        const int monitor = GetCurrentMonitor();
+        SetWindowSize(GetMonitorWidth(monitor), GetMonitorHeight(monitor));
+        ToggleFullscreen();
+    }
 
     for (Game &game : games)
     {
@@ -368,21 +387,28 @@ int main(int argc, char **argv)
     }
 
     // ------------------------------------------------------------ menu music
-    // Each theme is the player's own file, like the box art: nothing is shipped.
-    // A missing one is not an error, it just makes the menu quieter.
+    // Each theme is the player's own file, like the box art: nothing is shipped,
+    // and having none is not an error. With nothing to play the audio device is
+    // never opened at all, so a launcher with an empty music/ is completely silent
+    // to the sound server rather than holding an idle output open.
     const float musicVolume = std::max(0.0f, std::min(1.0f, settings.musicVolume));
+    bool anyThemeFile = false;
+    for (const Game &game : games)
+        if (FileExists(game.music.c_str()))
+            anyThemeFile = true;
+
     bool audioReady = false;
     int themesLoaded = 0;
-    if (musicVolume > 0.0f)
+    if (musicVolume <= 0.0f)
+        std::fprintf(stderr, "[launcher] menu music off (music_volume=0)\n");
+    else if (!anyThemeFile)
+        std::fprintf(stderr, "[launcher] no theme music in music/ yet: the menu will be silent\n");
+    else
     {
         InitAudioDevice();
         audioReady = IsAudioDeviceReady();
         if (!audioReady)
             std::fprintf(stderr, "[launcher] no audio device: the menu will be silent\n");
-    }
-    else
-    {
-        std::fprintf(stderr, "[launcher] menu music off (music_volume=0)\n");
     }
 
     for (Game &game : games)
@@ -431,20 +457,85 @@ int main(int argc, char **argv)
     // often rather than every frame.
     float stickCooldown = 0.0f;
 
-    while (!WindowShouldClose())
+    // The game runs as its own process. Waiting for it in a thread rather than
+    // blocking the loop is what lets the launcher keep answering the window
+    // manager while the game is up, and notice the moment it exits.
+    std::atomic<bool> gameRunning{false};
+    std::atomic<int> gameExit{0};
+    std::thread gameThread;
+    bool gameWasRunning = false;
+    float menuLit = 1.0f; // ramps back up when a game closes
+
+    auto startGame = [&](const Game &game)
     {
+        if (gameRunning)
+            return;
+        const std::string command = launchCommand(game);
+        std::fprintf(stderr, "[launcher] %s\n", command.c_str());
+        if (gameThread.joinable())
+            gameThread.join();
+        gameRunning = true;
+        gameExit = 0;
+        gameWasRunning = true; // away from the menu from here, however briefly
+        SetTargetFPS(10);      // the black screen needs no more than this
+        gameThread = std::thread([&gameRunning, &gameExit, command]
+        {
+            gameExit = std::system(command.c_str());
+            gameRunning = false;
+        });
+    };
+
+    while (true)
+    {
+        // While the game is up: a black screen on a slow timer, which is all that
+        // is needed to stay alive and answer the window manager. Closing the window
+        // is ignored here on purpose - the game is still running, and quitting now
+        // would leave it orphaned.
+        if (gameRunning)
+        {
+            BeginDrawing();
+            ClearBackground(BLACK);
+            EndDrawing();
+            continue;
+        }
+        if (gameWasRunning)
+        {
+            // The game has closed, however it was closed. Bring the menu back and
+            // light it up rather than snapping to it.
+            gameWasRunning = false;
+            SetTargetFPS(60);
+            SetWindowFocused();
+            menuLit = 0.0f;
+            if (gameExit.load() != 0)
+                std::fprintf(stderr, "[launcher] %s exited with status %d\n", games[selected].id.c_str(),
+                             gameExit.load());
+            if (!musicMuted)
+                startTheme(games[selected]);
+        }
+        if (WindowShouldClose())
+            break;
+
         const float width = static_cast<float>(GetScreenWidth());
         const float height = static_cast<float>(GetScreenHeight());
         const float delta = GetFrameTime();
 
         // ---------------------------------------------------------- layout
-        const float totalWidth = kArtWidth * games.size() + kGap * (games.size() - 1);
+        // Everything scales with the display, so going fullscreen on a large monitor
+        // fills it instead of leaving a small window's worth of content in the
+        // middle. 1.0 at 1280x720, which is where the design was drawn.
+        const float s = std::max(0.8f, std::min(2.5f, std::min(width / 1280.0f, height / 720.0f)));
+        const float artWidth = kArtWidth * s;
+        const float artHeight = kArtHeight * s;
+        const float gap = kGap * s;
+        const auto px = [s](float v) { return static_cast<int>(std::lround(v * s)); };
+
+        const float totalWidth = artWidth * games.size() + gap * (games.size() - 1);
         float x = (width - totalWidth) * 0.5f;
-        const float artY = (height - kArtHeight) * 0.5f - 26.0f; // room for two title lines below
+        const float artY = (height - artHeight) * 0.5f - 26.0f * s; // room for two title lines below
         for (size_t i = 0; i < games.size(); ++i)
         {
-            cards[i].bounds = (Rectangle){x, artY, kArtWidth, kArtHeight};
-            x += kArtWidth + kGap;
+            cards[i].bounds = (Rectangle){x, artY, artWidth, artHeight};
+            x += artWidth + gap;
         }
 
         // ---------------------------------------------------------- input
@@ -464,6 +555,14 @@ int main(int argc, char **argv)
             selected = (selected + 1) % static_cast<int>(games.size());
         if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
             activate = true;
+        if (IsKeyPressed(KEY_F11) && screenshotPath.empty())
+        {
+            ToggleFullscreen();
+            // Leaving fullscreen leaves the window at the monitor's size, so put it
+            // back to the size the layout was drawn for.
+            if (!IsWindowFullscreen())
+                SetWindowSize(1280, 720);
+        }
 
         const int gamepad = 0;
         if (IsGamepadAvailable(gamepad))
@@ -536,10 +635,8 @@ int main(int argc, char **argv)
 
         if (activate && games[selected].available)
         {
-            silenceThemes(games);
-            launchGame(games[selected]);
-            if (!musicMuted)
-                startTheme(games[selected]);
+            silenceThemes(games); // the game brings its own music
+            startGame(games[selected]);
         }
 
         // ---------------------------------------------------------- draw
@@ -556,13 +653,13 @@ int main(int argc, char **argv)
         }
 
         const char *heading = "GRAND THEFT AUTO:";
-        const float headingWidth = static_cast<float>(MeasureText(heading, 44));
-        DrawText(heading, static_cast<int>((width - headingWidth) * 0.5f), static_cast<int>(artY - 100.0f), 44,
+        const float headingWidth = static_cast<float>(MeasureText(heading, px(44)));
+        DrawText(heading, static_cast<int>((width - headingWidth) * 0.5f), static_cast<int>(artY - 100.0f * s), px(44),
                  (Color){236, 240, 248, 255});
         const char *subheading = "The Stories Collection";
-        const float subheadingWidth = static_cast<float>(MeasureText(subheading, 28));
-        DrawText(subheading, static_cast<int>((width - subheadingWidth) * 0.5f), static_cast<int>(artY - 48.0f), 28,
-                 (Color){240, 200, 90, 255});
+        const float subheadingWidth = static_cast<float>(MeasureText(subheading, px(28)));
+        DrawText(subheading, static_cast<int>((width - subheadingWidth) * 0.5f), static_cast<int>(artY - 48.0f * s),
+                 px(28), (Color){240, 200, 90, 255});
 
         for (size_t i = 0; i < games.size(); ++i)
         {
@@ -581,7 +678,7 @@ int main(int argc, char **argv)
             {
                 for (int ring = 5; ring >= 1; --ring)
                 {
-                    const float spread = 6.0f + static_cast<float>(ring) * 7.0f;
+                    const float spread = (6.0f + static_cast<float>(ring) * 7.0f) * s;
                     const unsigned char alpha = static_cast<unsigned char>(14 * card.highlight);
                     DrawRectangleRounded((Rectangle){art.x - spread, art.y - spread, art.width + spread * 2,
                                                      art.height + spread * 2},
@@ -589,8 +686,8 @@ int main(int argc, char **argv)
                 }
             }
             const unsigned char frame = static_cast<unsigned char>(40 + 190 * card.highlight);
-            DrawRectangleRounded((Rectangle){art.x - 5, art.y - 5, art.width + 10, art.height + 10}, 0.02f, 4,
-                                 (Color){frame, frame, frame, 255});
+            DrawRectangleRounded((Rectangle){art.x - 5 * s, art.y - 5 * s, art.width + 10 * s, art.height + 10 * s},
+                                 0.02f, 4, (Color){frame, frame, frame, 255});
 
             if (game.artLoaded)
             {
@@ -612,13 +709,13 @@ int main(int argc, char **argv)
             {
                 DrawRectangleRec(art, (Color){30, 34, 44, 255});
                 const char *placeholder = "BOX ART";
-                const float placeholderWidth = static_cast<float>(MeasureText(placeholder, 28));
+                const float placeholderWidth = static_cast<float>(MeasureText(placeholder, px(28)));
                 DrawText(placeholder, static_cast<int>(art.x + (art.width - placeholderWidth) * 0.5f),
-                         static_cast<int>(art.y + art.height * 0.5f - 14.0f), 28, (Color){70, 78, 96, 255});
+                         static_cast<int>(art.y + art.height * 0.5f - 14.0f * s), px(28), (Color){70, 78, 96, 255});
                 const char *hint = TextFormat("drop %s here", game.art.c_str());
-                const float hintWidth = static_cast<float>(MeasureText(hint, 16));
+                const float hintWidth = static_cast<float>(MeasureText(hint, px(16)));
                 DrawText(hint, static_cast<int>(art.x + (art.width - hintWidth) * 0.5f),
-                         static_cast<int>(art.y + art.height * 0.5f + 22.0f), 16, (Color){58, 64, 80, 255});
+                         static_cast<int>(art.y + art.height * 0.5f + 22.0f * s), px(16), (Color){58, 64, 80, 255});
             }
 
             // The title under the card, wrapped so a long one can never run into
@@ -626,27 +723,28 @@ int main(int argc, char **argv)
             Color titleColor = (Color){108, 114, 130, 255};
             if (game.available)
                 titleColor = isSelected ? WHITE : (Color){196, 203, 216, 255};
-            const std::vector<std::string> titleLines = wrapText(game.title, 20, kArtWidth + 30.0f);
-            drawCenteredLines(titleLines, art.x + art.width * 0.5f, art.y + art.height + 16.0f, 20, titleColor, 24.0f);
+            const std::vector<std::string> titleLines = wrapText(game.title, px(20), artWidth + 30.0f * s);
+            drawCenteredLines(titleLines, art.x + art.width * 0.5f, art.y + art.height + 16.0f * s, px(20), titleColor,
+                              24.0f * s);
 
             if (!game.available)
             {
                 // A band rather than a wash: the notice stays readable whatever
                 // the cover underneath happens to be.
                 DrawRectangleRec(art, (Color){8, 9, 12, 150});
-                const float bandHeight = 56.0f;
+                const float bandHeight = 56.0f * s;
                 const float bandY = art.y + art.height * 0.5f - bandHeight * 0.5f;
                 DrawRectangle(static_cast<int>(art.x), static_cast<int>(bandY), static_cast<int>(art.width),
                               static_cast<int>(bandHeight), (Color){12, 13, 17, 255});
-                DrawRectangle(static_cast<int>(art.x), static_cast<int>(bandY), static_cast<int>(art.width), 2,
+                DrawRectangle(static_cast<int>(art.x), static_cast<int>(bandY), static_cast<int>(art.width), px(2),
                               (Color){240, 200, 90, 200});
-                DrawRectangle(static_cast<int>(art.x), static_cast<int>(bandY + bandHeight - 2),
-                              static_cast<int>(art.width), 2, (Color){240, 200, 90, 200});
+                DrawRectangle(static_cast<int>(art.x), static_cast<int>(bandY + bandHeight - px(2)),
+                              static_cast<int>(art.width), px(2), (Color){240, 200, 90, 200});
                 const char *soon = "COMING SOON!";
-                const float soonSize = 28.0f;
-                const float soonWidth = static_cast<float>(MeasureText(soon, static_cast<int>(soonSize)));
+                const int soonSize = px(28);
+                const float soonWidth = static_cast<float>(MeasureText(soon, soonSize));
                 DrawText(soon, static_cast<int>(art.x + (art.width - soonWidth) * 0.5f),
-                         static_cast<int>(bandY + bandHeight * 0.5f - soonSize * 0.5f), static_cast<int>(soonSize),
+                         static_cast<int>(bandY + bandHeight * 0.5f - soonSize * 0.5f), soonSize,
                          (Color){240, 200, 90, 255});
             }
             else if (card.highlight < 0.99f)
@@ -659,21 +757,30 @@ int main(int argc, char **argv)
         // Footer: how to drive it.
         std::string footer = "Left / Right or the stick to choose    -    ";
         footer += games[selected].available ? "Click or Cross to play" : "this one is still being built";
+        footer += "    -    F11: fullscreen";
         if (themesLoaded > 0)
             footer += musicMuted ? "    -    M: music off" : "    -    M: mute";
-        footer += "    -    Esc to quit";
-        const float footerWidth = static_cast<float>(MeasureText(footer.c_str(), 18));
-        DrawText(footer.c_str(), static_cast<int>((width - footerWidth) * 0.5f), static_cast<int>(height - 46.0f), 18,
-                 (Color){120, 130, 150, 255});
+        footer += "    -    Esc: quit";
+        const float footerWidth = static_cast<float>(MeasureText(footer.c_str(), px(18)));
+        DrawText(footer.c_str(), static_cast<int>((width - footerWidth) * 0.5f), static_cast<int>(height - 46.0f * s),
+                 px(18), (Color){120, 130, 150, 255});
 
         // Nothing in music/ yet: say where a theme would go. It disappears for
         // good the moment there is one, so it teaches without ever nagging.
-        if (audioReady && themesLoaded == 0)
+        if (musicVolume > 0.0f && themesLoaded == 0)
         {
             const char *hint = "each game's theme can play here - drop an mp3 into music/ (see music/README.txt)";
-            const float hintWidth = static_cast<float>(MeasureText(hint, 16));
-            DrawText(hint, static_cast<int>((width - hintWidth) * 0.5f), static_cast<int>(height - 22.0f), 16,
+            const float hintWidth = static_cast<float>(MeasureText(hint, px(16)));
+            DrawText(hint, static_cast<int>((width - hintWidth) * 0.5f), static_cast<int>(height - 22.0f * s), px(16),
                      (Color){84, 92, 110, 255});
+        }
+
+        // Lights back up when a game has closed, rather than snapping to it.
+        if (menuLit < 1.0f)
+        {
+            menuLit = std::min(1.0f, menuLit + delta * 2.5f);
+            DrawRectangle(0, 0, static_cast<int>(width), static_cast<int>(height),
+                          (Color){0, 0, 0, static_cast<unsigned char>((1.0f - menuLit) * 255.0f)});
         }
 
         EndDrawing();
@@ -687,6 +794,9 @@ int main(int argc, char **argv)
         if (IsKeyPressed(KEY_ESCAPE))
             break;
     }
+
+    if (gameThread.joinable())
+        gameThread.join(); // the loop only leaves once no game is running
 
     for (Game &game : games)
     {

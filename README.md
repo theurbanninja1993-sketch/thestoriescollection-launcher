@@ -23,12 +23,19 @@ spending an evening on it rather than after.
 
 - The menu: two cards with **your own box art**, mouse hover and d-pad / stick
   navigation, click or Cross to play, Esc to quit.
+- **Fullscreen by default** (F11 swaps), and the whole menu scales to the
+  display, so it fills a 1440p monitor rather than sitting small in the middle.
 - Launches whatever is already built, per the paths in `launcher.ini`.
 - A game marked `available=0` is dimmed, marked `COMING SOON!`, and will not
   launch.
 - **Each card can carry its own theme music**, from `music/`. It starts from the
   opening when a card is picked, fades in and out rather than cutting, swaps
   smoothly when you move between the two, and loops. `M` mutes.
+- **Playing a game is a round trip.** Choosing one blanks the screen while the
+  game runs and hands it the foreground; when the game closes, however it was
+  closed, the menu comes back lit with its theme playing again. The game's own
+  settings say *"Return to game select"* rather than *"Quit to desktop"* — because
+  from the launcher, that is where it goes.
 
 ## What is coming
 
@@ -53,7 +60,8 @@ raylib is fetched automatically. There are no other dependencies.
 ## Configuring
 
 Everything lives in `launcher.ini` next to the executable — the games, their
-paths, their box art, their theme music and whether they are available. See the
+paths, their box art, their theme music, whether the menu fills the screen and
+whether each game is available. See the
 comments in the file; the one thing to change first is the paths, which start out
 pointing at this machine's development builds.
 
@@ -67,7 +75,8 @@ turn menu music off entirely.
 
 ## Handy flags
 
-- `--screenshot <file.png>` — render one frame and exit. Used to check the
+- `--screenshot <file.png>` — render one frame and exit. Always windowed, at
+  1280x720, so a capture is the same size whatever the display. Used to check the
   layout without a person at the screen.
 - `--select <n>` — start with the nth card highlighted (pairs with
   `--screenshot` to capture a specific card's state).

@@ -491,7 +491,7 @@ int main(int argc, char **argv)
                 const float bandHeight = 56.0f;
                 const float bandY = art.y + art.height * 0.5f - bandHeight * 0.5f;
                 DrawRectangle(static_cast<int>(art.x), static_cast<int>(bandY), static_cast<int>(art.width),
-                              static_cast<int>(bandHeight), (Color){12, 13, 17, 235});
+                              static_cast<int>(bandHeight), (Color){12, 13, 17, 255});
                 DrawRectangle(static_cast<int>(art.x), static_cast<int>(bandY), static_cast<int>(art.width), 2,
                               (Color){240, 200, 90, 200});
                 DrawRectangle(static_cast<int>(art.x), static_cast<int>(bandY + bandHeight - 2),

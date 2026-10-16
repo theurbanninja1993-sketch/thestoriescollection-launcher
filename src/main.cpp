@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -23,6 +24,7 @@
 #if defined(PS2X_LAUNCHER_WINDOWS)
 #include <windows.h>
 #else
+#include <sys/wait.h>
 #include <unistd.h>
 #include <limits.h>
 #endif
@@ -93,6 +95,14 @@ namespace
         std::string art;   // box art png
         std::string music; // theme audio, played while this card is highlighted
         bool musicNamed = false; // whether the config named the file, for warnings
+        // The port's source, which the launcher fetches itself so a player only has
+        // to download the launcher. Empty portUrl means nothing to fetch.
+        std::string portUrl;
+        std::string portDir;  // where it is kept
+        std::string portRef;  // branch or tag
+        bool portConfigured = false;
+        std::string portLocal;  // revision on disk ("" = not fetched)
+        std::string portRemote; // revision the remote has ("" = not known)
         bool available = true;
         Texture2D artTexture{};
         bool artLoaded = false;
@@ -168,6 +178,12 @@ namespace
                 current->art = value;
             else if (key == "music")
                 current->music = value;
+            else if (key == "port")
+                current->portUrl = value;
+            else if (key == "port_dir")
+                current->portDir = value;
+            else if (key == "port_ref")
+                current->portRef = value;
             else if (key == "available")
                 current->available = std::atoi(value.c_str()) != 0;
         }
@@ -201,6 +217,108 @@ namespace
             SetMusicVolume(game.theme, 0.0f);
             StopMusicStream(game.theme);
         }
+    }
+
+    // ------------------------------------------------------------ port source
+    // The port's source is fetched by the launcher rather than cloned by hand, so a
+    // player downloads one repository instead of two. It is source, plainly: what
+    // makes the game is their own disc, and it is built on their own machine.
+
+    const char *platformFolder()
+    {
+#if defined(PS2X_LAUNCHER_WINDOWS)
+        return "windows";
+#else
+        return "linux";
+#endif
+    }
+
+    const char *runnerName()
+    {
+#if defined(PS2X_LAUNCHER_WINDOWS)
+        return "ps2EntryRunner.exe";
+#else
+        return "ps2EntryRunner";
+#endif
+    }
+
+    // Runs a command, keeping the last line it printed: that is what the fetch
+    // screen shows while it works. Output is captured rather than inherited so the
+    // screen can report it, and stderr is folded in because git prints progress
+    // and errors there.
+    int runCaptured(const std::string &command, std::mutex &mutex, std::string &lastLine)
+    {
+#if defined(PS2X_LAUNCHER_WINDOWS)
+        FILE *pipe = _popen(command.c_str(), "r");
+#else
+        FILE *pipe = popen(command.c_str(), "r");
+#endif
+        if (pipe == nullptr)
+            return -1;
+        char line[512];
+        while (std::fgets(line, sizeof line, pipe) != nullptr)
+        {
+            const std::string text = trim(line);
+            if (!text.empty())
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                lastLine = text;
+            }
+        }
+#if defined(PS2X_LAUNCHER_WINDOWS)
+        return _pclose(pipe);
+#else
+        const int status = pclose(pipe);
+        return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+#endif
+    }
+
+    // The revision of a fetched tree, or "" when there is not one to read.
+    std::string readRevision(const std::string &directory)
+    {
+        if (directory.empty())
+            return {};
+        std::mutex discard;
+        std::string line;
+        const std::string command = "git -C \"" + directory + "\" rev-parse HEAD 2>&1";
+        return runCaptured(command, discard, line) == 0 ? line : std::string{};
+    }
+
+    std::string portRefOf(const Game &game) { return game.portRef.empty() ? "main" : game.portRef; }
+
+    // A shallow clone the first time. After that, take the ref again and reset onto
+    // it: the source is not the player's to edit, and this is what makes an update
+    // deterministic rather than a merge that can fail next to their changes.
+    std::string fetchCommand(const Game &game)
+    {
+        if (game.portLocal.empty())
+            return "git clone --depth 1 --branch \"" + portRefOf(game) + "\" \"" + game.portUrl + "\" \"" +
+                   game.portDir + "\" 2>&1";
+        return "git -C \"" + game.portDir + "\" fetch --depth 1 origin \"" + portRefOf(game) + "\" 2>&1 && "
+               "git -C \"" + game.portDir + "\" reset --hard FETCH_HEAD 2>&1";
+    }
+
+    // What the remote has for the ref, without touching the working tree.
+    std::string checkCommand(const Game &game)
+    {
+        return "git ls-remote \"" + game.portUrl + "\" \"" + portRefOf(game) + "\" 2>&1";
+    }
+
+    std::string shortRevision(const std::string &revision)
+    {
+        return revision.size() > 7 ? revision.substr(0, 7) : revision;
+    }
+
+    // The one-line summary drawn under a card, or "" when there is nothing to say.
+    std::string portSummary(const Game &game)
+    {
+        if (!game.portConfigured)
+            return {};
+        if (game.portLocal.empty())
+            return "source not fetched - press U";
+        if (!game.portRemote.empty() && game.portRemote != game.portLocal)
+            return "source update available - press U";
+        return "source ready (" + shortRevision(game.portLocal) + ")";
     }
 
     // ---------------------------------------------------------------- launch
@@ -294,9 +412,30 @@ int main(int argc, char **argv)
     // launcher.ini normally sits beside the executable (that is the release
     // layout); falling back to the working directory keeps development simple,
     // where the binary lives in build/ but the config does not.
-    std::string configPath = resolve(directory, "launcher.ini");
-    if (!FileExists(configPath.c_str()))
-        configPath = "launcher.ini";
+    // --config decides which file everything else is read from, so it is picked
+    // out before anything is. It is how a developer keeps their own build paths
+    // while the launcher.ini that ships stays what a player actually needs.
+    std::string configOverride;
+    for (int i = 1; i < argc; ++i)
+        if (std::strcmp(argv[i], "--config") == 0 && i + 1 < argc)
+            configOverride = argv[i + 1];
+
+    std::string configPath;
+    if (!configOverride.empty())
+    {
+        configPath = configOverride;
+        if (!FileExists(configPath.c_str()))
+        {
+            std::fprintf(stderr, "[launcher] no config at %s\n", configPath.c_str());
+            return 1;
+        }
+    }
+    else
+    {
+        configPath = resolve(directory, "launcher.ini");
+        if (!FileExists(configPath.c_str()))
+            configPath = "launcher.ini";
+    }
     // Relative paths inside the config (art, games/) are relative to the config
     // itself, so the whole folder can be moved anywhere as one unit.
     const std::string base = directoryOf(configPath);
@@ -335,6 +474,16 @@ int main(int argc, char **argv)
     // relative path is beside the config, so a release folder moves as one unit.
     for (Game &game : games)
     {
+        // A game whose source the launcher fetches also gets its paths for free: a
+        // build puts the runner and the player's own game files in a known place, so
+        // neither has to be written into the config by hand.
+        game.portConfigured = !game.portUrl.empty();
+        game.portDir = resolve(base, game.portDir.empty() ? ("port/" + game.id) : game.portDir);
+        if (game.portConfigured && game.exe.empty())
+            game.exe = game.portDir + "/dist/" + platformFolder() + "/" + runnerName();
+        if (game.portConfigured && game.data.empty())
+            game.data = game.portDir + "/dist/" + platformFolder() + "/game";
+
         game.exe = resolve(base, game.exe);
         game.data = resolve(base, game.data);
         // The theme is optional. When the config does not name one, music/<id>.mp3
@@ -342,6 +491,9 @@ int main(int argc, char **argv)
         // name needs no edit at all.
         game.musicNamed = !game.music.empty();
         game.music = resolve(base, game.musicNamed ? game.music : ("music/" + game.id + ".mp3"));
+        // And the cover: art/<id>.png is what a drop-in would be called, so a card
+        // with none still says exactly which file it is waiting for.
+        game.art = resolve(base, game.art.empty() ? ("art/" + game.id + ".png") : game.art);
     }
 
     // --launch skips the menu entirely, so a desktop shortcut can start a game
@@ -457,63 +609,169 @@ int main(int argc, char **argv)
     // often rather than every frame.
     float stickCooldown = 0.0f;
 
-    // The game runs as its own process. Waiting for it in a thread rather than
-    // blocking the loop is what lets the launcher keep answering the window
-    // manager while the game is up, and notice the moment it exits.
-    std::atomic<bool> gameRunning{false};
-    std::atomic<int> gameExit{0};
-    std::thread gameThread;
-    bool gameWasRunning = false;
-    float menuLit = 1.0f; // ramps back up when a game closes
+    // What of each game's source is already here. Reading a revision is a local git
+    // call, so it costs nothing to do now.
+    for (Game &game : games)
+        if (game.portConfigured && !game.portLocal.empty())
+            game.portRemote = ""; // the check fills this in below
+    for (Game &game : games)
+        if (game.portConfigured)
+            game.portLocal = readRevision(game.portDir);
 
-    auto startGame = [&](const Game &game)
+    // Ask each remote what it has, in the background: the menu must never wait on
+    // the network, and a machine that is offline simply never learns of an update.
+    std::atomic<bool> checksDone{false};
+    std::vector<std::string> checkedRevisions(games.size());
+    std::thread checkThread;
+    auto startUpdateChecks = [&]
     {
-        if (gameRunning)
-            return;
-        const std::string command = launchCommand(game);
-        std::fprintf(stderr, "[launcher] %s\n", command.c_str());
-        if (gameThread.joinable())
-            gameThread.join();
-        gameRunning = true;
-        gameExit = 0;
-        gameWasRunning = true; // away from the menu from here, however briefly
-        SetTargetFPS(10);      // the black screen needs no more than this
-        gameThread = std::thread([&gameRunning, &gameExit, command]
+        if (checkThread.joinable())
+            checkThread.join();
+        checksDone = false;
+        checkThread = std::thread([&, checked = &checkedRevisions]
         {
-            gameExit = std::system(command.c_str());
-            gameRunning = false;
+            for (size_t i = 0; i < games.size(); ++i)
+            {
+                if (!games[i].portConfigured)
+                    continue;
+                std::mutex discard;
+                std::string line;
+                if (runCaptured(checkCommand(games[i]), discard, line) != 0)
+                    continue; // offline, or no git: there is simply nothing to report
+                const size_t space = line.find_first_of(" \t");
+                const std::string revision = space == std::string::npos ? line : line.substr(0, space);
+                if (revision.size() >= 7 && revision.find_first_not_of("0123456789abcdef") == std::string::npos)
+                    (*checked)[i] = revision;
+            }
+            checksDone = true;
         });
+    };
+    startUpdateChecks();
+
+    // One background job at a time: the game, or fetching a port's source. Waiting
+    // in a thread rather than blocking the loop is what lets the launcher keep
+    // answering the window manager while it works, and notice the moment it ends.
+    enum class Job { None, Game, Fetch };
+    std::atomic<int> jobKind{static_cast<int>(Job::None)};
+    std::atomic<int> jobStatus{0};
+    std::thread jobThread;
+    Job jobAway = Job::None; // not None while we are away from the menu
+    int jobGame = -1;
+    std::mutex jobMutex;   // guards jobDetail
+    std::string jobDetail; // the last line the job printed
+    float menuLit = 1.0f;  // ramps back up when a job finishes
+
+    auto startJob = [&](Job kind, int index, const std::string &command, bool captureOutput)
+    {
+        if (jobKind.load() != static_cast<int>(Job::None))
+            return;
+        if (jobThread.joinable())
+            jobThread.join();
+        jobGame = index;
+        jobAway = kind;
+        jobStatus = 0;
+        {
+            std::lock_guard<std::mutex> lock(jobMutex);
+            jobDetail.clear();
+        }
+        jobKind = static_cast<int>(kind);
+        SetTargetFPS(kind == Job::Game ? 10 : 20); // neither needs a full frame rate
+        std::fprintf(stderr, "[launcher] %s\n", command.c_str());
+        jobThread = std::thread([&, kind, command, captureOutput]
+        {
+            jobStatus = captureOutput ? runCaptured(command, jobMutex, jobDetail) : std::system(command.c_str());
+            jobKind = static_cast<int>(Job::None);
+        });
+    };
+
+    // What is drawn while the launcher is away from the menu. A game gets a black
+    // screen because the game itself is about to cover it; a fetch has nothing
+    // behind it, so it says what it is doing.
+    auto drawAwayScreen = [&](Job kind)
+    {
+        const float w = static_cast<float>(GetScreenWidth());
+        const float h = static_cast<float>(GetScreenHeight());
+        const float fs = std::max(0.8f, std::min(2.5f, std::min(w / 1280.0f, h / 720.0f)));
+        const auto px = [fs](float v) { return static_cast<int>(std::lround(v * fs)); };
+        ClearBackground(kind == Job::Game ? BLACK : (Color){12, 13, 17, 255});
+        if (kind != Job::Fetch || jobGame < 0 || jobGame >= static_cast<int>(games.size()))
+            return;
+
+        const std::vector<std::string> heading =
+            wrapText("Fetching the source for " + games[jobGame].title, px(26), w * 0.8f);
+        std::string detail;
+        {
+            std::lock_guard<std::mutex> lock(jobMutex);
+            detail = jobDetail;
+        }
+        float y = (h - 150.0f * fs - static_cast<float>(heading.size()) * 34.0f * fs) * 0.5f;
+        drawCenteredLines(heading, w * 0.5f, y, px(26), (Color){236, 240, 248, 255}, 34.0f * fs);
+        y += static_cast<float>(heading.size()) * 34.0f * fs + 20.0f * fs;
+        if (!detail.empty())
+        {
+            // The tail of what git last said: progress on the way, an error if not.
+            const std::vector<std::string> lines = wrapText(detail, px(18), w * 0.8f);
+            drawCenteredLines({lines.back()}, w * 0.5f, y, px(18), (Color){150, 158, 176, 255}, 24.0f * fs);
+        }
+        y += 44.0f * fs;
+        const std::vector<std::string> note =
+            wrapText("The port's own source, not the game - your disc is what makes the game.", px(16), w * 0.8f);
+        drawCenteredLines(note, w * 0.5f, y, px(16), (Color){104, 112, 130, 255}, 22.0f * fs);
     };
 
     while (true)
     {
-        // While the game is up: a black screen on a slow timer, which is all that
-        // is needed to stay alive and answer the window manager. Closing the window
-        // is ignored here on purpose - the game is still running, and quitting now
-        // would leave it orphaned.
-        if (gameRunning)
+        // Away from the menu. Closing the window is ignored on purpose: the work is
+        // still going, and quitting now would leave a game running or a clone half
+        // written.
+        if (jobKind.load() != static_cast<int>(Job::None))
         {
             BeginDrawing();
-            ClearBackground(BLACK);
+            drawAwayScreen(static_cast<Job>(jobKind.load()));
             EndDrawing();
             continue;
         }
-        if (gameWasRunning)
+        if (jobAway != Job::None)
         {
-            // The game has closed, however it was closed. Bring the menu back and
-            // light it up rather than snapping to it.
-            gameWasRunning = false;
+            const Job finished = jobAway;
+            const int status = jobStatus.load();
+            const int index = jobGame;
+            jobAway = Job::None;
             SetTargetFPS(60);
             SetWindowFocused();
             menuLit = 0.0f;
-            if (gameExit.load() != 0)
-                std::fprintf(stderr, "[launcher] %s exited with status %d\n", games[selected].id.c_str(),
-                             gameExit.load());
-            if (!musicMuted)
-                startTheme(games[selected]);
+            if (finished == Job::Game)
+            {
+                if (status != 0)
+                    std::fprintf(stderr, "[launcher] %s exited with status %d\n", games[selected].id.c_str(), status);
+                if (!musicMuted)
+                    startTheme(games[selected]);
+            }
+            else if (index >= 0 && index < static_cast<int>(games.size()))
+            {
+                games[index].portLocal = readRevision(games[index].portDir);
+                if (status == 0 && !games[index].portLocal.empty())
+                {
+                    // Just taken from the ref, so this *is* what the remote has.
+                    games[index].portRemote = games[index].portLocal;
+                }
+                else
+                {
+                    std::fprintf(stderr, "[launcher] fetching the %s source failed (status %d)\n",
+                                 games[index].id.c_str(), status);
+                }
+            }
         }
         if (WindowShouldClose())
             break;
+        if (checksDone)
+        {
+            // The background check has answered: fold it into the cards.
+            checksDone = false;
+            for (size_t i = 0; i < games.size(); ++i)
+                if (!checkedRevisions[i].empty())
+                    games[i].portRemote = checkedRevisions[i];
+        }
 
         const float width = static_cast<float>(GetScreenWidth());
         const float height = static_cast<float>(GetScreenHeight());
@@ -555,6 +813,8 @@ int main(int argc, char **argv)
             selected = (selected + 1) % static_cast<int>(games.size());
         if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
             activate = true;
+        if (IsKeyPressed(KEY_U) && games[selected].portConfigured)
+            startJob(Job::Fetch, selected, fetchCommand(games[selected]), true);
         if (IsKeyPressed(KEY_F11) && screenshotPath.empty())
         {
             ToggleFullscreen();
@@ -636,7 +896,7 @@ int main(int argc, char **argv)
         if (activate && games[selected].available)
         {
             silenceThemes(games); // the game brings its own music
-            startGame(games[selected]);
+            startJob(Job::Game, selected, launchCommand(games[selected]), false);
         }
 
         // ---------------------------------------------------------- draw
@@ -727,6 +987,20 @@ int main(int argc, char **argv)
             drawCenteredLines(titleLines, art.x + art.width * 0.5f, art.y + art.height + 16.0f * s, px(20), titleColor,
                               24.0f * s);
 
+            // Where this game's source stands, when the launcher is the one fetching
+            // it. It says what to press, so the footer does not have to.
+            const std::string portLine = portSummary(game);
+            if (!portLine.empty())
+            {
+                const bool onThePlayer = game.portLocal.empty() ||
+                                         (!game.portRemote.empty() && game.portRemote != game.portLocal);
+                const float portY = art.y + art.height + 16.0f * s +
+                                    static_cast<float>(titleLines.size()) * 24.0f * s + 8.0f * s;
+                drawCenteredLines({portLine}, art.x + art.width * 0.5f, portY, px(15),
+                                  onThePlayer ? (Color){240, 200, 90, 255} : (Color){104, 112, 130, 255},
+                                  20.0f * s);
+            }
+
             if (!game.available)
             {
                 // A band rather than a wash: the notice stays readable whatever
@@ -795,8 +1069,10 @@ int main(int argc, char **argv)
             break;
     }
 
-    if (gameThread.joinable())
-        gameThread.join(); // the loop only leaves once no game is running
+    if (jobThread.joinable())
+        jobThread.join(); // the loop only leaves once nothing is running
+    if (checkThread.joinable())
+        checkThread.join();
 
     for (Game &game : games)
     {

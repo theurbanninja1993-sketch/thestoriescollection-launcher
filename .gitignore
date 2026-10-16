@@ -11,3 +11,8 @@ music/*.ogg
 music/*.wav
 music/*.qoa
 /*.png
+
+# the port source the launcher fetches: reproduceable, and not ours to track
+port/
+# this machine's own build paths; launcher.ini is the one that ships
+launcher.dev.ini

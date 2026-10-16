@@ -31,6 +31,9 @@ spending an evening on it rather than after.
 - **Each card can carry its own theme music**, from `music/`. It starts from the
   opening when a card is picked, fades in and out rather than cutting, swaps
   smoothly when you move between the two, and loops. `M` mutes.
+- **It fetches the port's source for you.** Press `U` on a card and the launcher
+  downloads or updates that game's source itself, so this repository is the whole
+  download. Source only — never a built game. The card says where it stands.
 - **Playing a game is a round trip.** Choosing one blanks the screen while the
   game runs and hands it the foreground; when the game closes, however it was
   closed, the menu comes back lit with its theme playing again. The game's own
@@ -39,15 +42,37 @@ spending an evening on it rather than after.
 
 ## What is coming
 
-- **Phase 2 — the builder wizard.** Point it at your own disc (read straight
-  from the drive, or a `.iso` / `.bin` you already made): it verifies the disc,
+- **Phase 2 — the builder wizard.** Fetching the source is already in, on the `U`
+  key. The wizard takes it from there: point it at your own disc (read straight
+  from the drive, or a `.iso` / `.bin` you already made) and it verifies the disc,
   extracts it, runs the VU1 learning passes and compiles the game, then hands
   you back to this menu. Nothing of Rockstar's is shipped — your disc produces
-  it.
+  it. `U` plus a disc becomes the whole install.
 - **Phase 3 — the build orchestration** (bundled toolchain, progress and ETA).
 - **Phase 4 — packaging per OS.**
 
-## Building it
+## Where the game comes from
+
+Nothing but **source** is ever downloaded — never a built game. What makes the game
+is your own disc, recompiled on your own machine. That is deliberate: it is why
+this repository holds no game files of any kind, and it is also why the result
+works on machines an already-built binary would refuse to start on.
+
+The launcher fetches that source itself, so **downloading this repository is the
+whole download**. Sit on a card and press `U`. The card reports where its source
+stands — `source not fetched`, `source update available`, or the revision it
+already has — and an update is only ever taken when you ask for it.
+
+Then build it, from the folder it arrived in:
+
+```sh
+cd port/vcs && ./build.sh --image /dev/sr0     # or a .iso / folder you have
+```
+
+That needs a C++ toolchain and cmake, and takes roughly 20 minutes. It produces
+`port/vcs/dist/`, which is exactly what the menu launches.
+
+## Building the launcher itself
 
 ```sh
 cmake -S . -B build
@@ -59,11 +84,15 @@ raylib is fetched automatically. There are no other dependencies.
 
 ## Configuring
 
-Everything lives in `launcher.ini` next to the executable — the games, their
-paths, their box art, their theme music, whether the menu fills the screen and
-whether each game is available. See the
-comments in the file; the one thing to change first is the paths, which start out
-pointing at this machine's development builds.
+Everything lives in `launcher.ini` next to the executable: the games, their source
+repositories, their box art, their theme music, whether the menu fills the screen,
+and whether each game is available. See the comments in the file. The runner and
+the player's own game files are worked out from wherever the source was fetched
+to, so there is normally nothing to set beyond the repository address.
+
+`--config <file>` reads a different file instead, which is how a developer keeps
+their own build paths — `launcher.dev.ini` here is one, and it is not tracked
+because it is specific to this machine.
 
 Box art goes in `art/` — see `art/README.txt`. Theme music goes in `music/` — see
 `music/README.txt`. **Neither is shipped**: the covers and the themes are
@@ -75,6 +104,7 @@ turn menu music off entirely.
 
 ## Handy flags
 
+- `--config <file>` — read a different config instead of `launcher.ini`.
 - `--screenshot <file.png>` — render one frame and exit. Always windowed, at
   1280x720, so a capture is the same size whatever the display. Used to check the
   layout without a person at the screen.
@@ -83,9 +113,10 @@ turn menu music off entirely.
 
 ## Layout
 
-    launcher.ini        the games, their paths, their themes and their state
+    launcher.ini        the games, their source, their paths and their state
     art/                box art (supplied by you)
     music/              theme music (supplied by you)
+    port/               the port source the launcher fetches (created on demand)
     src/main.cpp        the menu
     games/              (release layout) one folder per game, beside the launcher
 

@@ -9,6 +9,16 @@ Two ports share it — **Liberty City Stories** and **Vice City Stories** — be
 they are the same runtime underneath; only the generated game code differs. LCS
 is still in progress, so its card says `COMING SOON!` until it is ready.
 
+## Built with AI
+
+This launcher was written with substantial help from AI: the code came from
+coding assistants under human direction, and every change was built and run
+before it was kept.
+
+It is said plainly, and early, because some people would rather not use software
+made this way. That is a fair position to hold, and you have found out before
+spending an evening on it rather than after.
+
 ## What it does today (phase 1)
 
 - The menu: two cards with **your own box art**, mouse hover and d-pad / stick

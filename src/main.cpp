@@ -409,14 +409,14 @@ int main(int argc, char **argv)
                                    (Color){24, 27, 36, 255}, (Color){14, 15, 20, 255});
         }
 
-        const char *heading = "GRAND THEFT AUTO";
+        const char *heading = "GRAND THEFT AUTO:";
         const float headingWidth = static_cast<float>(MeasureText(heading, 44));
-        DrawText(heading, static_cast<int>((width - headingWidth) * 0.5f), static_cast<int>(artY - 96.0f), 44,
+        DrawText(heading, static_cast<int>((width - headingWidth) * 0.5f), static_cast<int>(artY - 100.0f), 44,
                  (Color){236, 240, 248, 255});
-        const char *subheading = "PlayStation 2 recompilation";
-        const float subheadingWidth = static_cast<float>(MeasureText(subheading, 20));
-        DrawText(subheading, static_cast<int>((width - subheadingWidth) * 0.5f), static_cast<int>(artY - 44.0f), 20,
-                 (Color){120, 130, 150, 255});
+        const char *subheading = "The Stories Collection";
+        const float subheadingWidth = static_cast<float>(MeasureText(subheading, 28));
+        DrawText(subheading, static_cast<int>((width - subheadingWidth) * 0.5f), static_cast<int>(artY - 48.0f), 28,
+                 (Color){240, 200, 90, 255});
 
         for (size_t i = 0; i < games.size(); ++i)
         {

@@ -1,0 +1,8 @@
+build/
+imgui.ini
+*.o
+*.so
+*.dll
+*.exe
+art/*.png
+/*.png

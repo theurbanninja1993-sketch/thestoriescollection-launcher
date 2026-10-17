@@ -996,6 +996,63 @@ int main(int argc, char **argv)
         return false;
     };
 
+    // A stick reads as a direction once it is pushed past this, and not again until
+    // it comes back.
+    auto padStickX = [&activePad]() -> float
+    {
+        for (int slot = 0; slot < 4; ++slot)
+        {
+            if (!IsGamepadAvailable(slot))
+                continue;
+            const float x = GetGamepadAxisMovement(slot, GAMEPAD_AXIS_LEFT_X);
+            if (std::fabs(x) > 0.5f)
+            {
+                activePad = slot;
+                return x;
+            }
+        }
+        return 0.0f;
+    };
+
+    // The two confirmation screens are answered the same way: move between the
+    // options, and Cross takes the one under the highlight. That is how a console
+    // dialog has always worked, and it means the button you are looking at is the
+    // one that happens - rather than one button always meaning yes and another
+    // always meaning no. Returns 0 for the first option, 1 for the second, -1 for
+    // nothing yet.
+    int dialogChoice = 0;
+    float dialogStick = 0.0f;
+    auto dialogPick = [&](const Rectangle &first, const Rectangle &second) -> int
+    {
+        const Vector2 mouse = GetMousePosition();
+        if (CheckCollisionPointRec(mouse, first))
+            dialogChoice = 0;
+        else if (CheckCollisionPointRec(mouse, second))
+            dialogChoice = 1;
+
+        if (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_A) || padPressedAny(GAMEPAD_BUTTON_LEFT_FACE_LEFT))
+            dialogChoice = 0;
+        if (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_D) || padPressedAny(GAMEPAD_BUTTON_LEFT_FACE_RIGHT))
+            dialogChoice = 1;
+        dialogStick -= GetFrameTime();
+        const float stick = padStickX();
+        if (dialogStick <= 0.0f && std::fabs(stick) > 0.5f)
+        {
+            dialogChoice = stick < 0.0f ? 0 : 1;
+            dialogStick = 0.25f;
+        }
+
+        const Rectangle chosen = dialogChoice == 0 ? first : second;
+        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE) ||
+            (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, chosen)) ||
+            padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_DOWN))
+            return dialogChoice;
+        // Backing out is always the second option, which is the one that does nothing.
+        if (IsKeyPressed(KEY_ESCAPE) || padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
+            return 1;
+        return -1;
+    };
+
     while (true)
     {
         // Which names this pad's buttons go by, read once a frame so a controller
@@ -1180,6 +1237,7 @@ int main(int argc, char **argv)
                     wizardImage = sources[sourcePick].path;
                     wizardLabel = sources[sourcePick].label;
                     wizardFromPicker = true;
+                    dialogChoice = 0; // Start
                     wizard = Wizard::Confirm;
                 }
             }
@@ -1206,19 +1264,19 @@ int main(int argc, char **argv)
             const float buttonW = 168.0f * fs, buttonH = 46.0f * fs, buttonGap = 34.0f * fs;
             const Rectangle yes = {w * 0.5f - buttonW - buttonGap * 0.5f, h * 0.5f + 20.0f * fs, buttonW, buttonH};
             const Rectangle no = {w * 0.5f + buttonGap * 0.5f, yes.y, buttonW, buttonH};
-            const auto drawButton = [&](const Rectangle &rect, const char *text)
+            const auto drawButton = [&](const Rectangle &rect, const char *text, bool highlighted)
             {
-                const bool over = CheckCollisionPointRec(mouse, rect);
-                DrawRectangleRounded(rect, 0.3f, 4, over ? (Color){62, 92, 150, 255} : (Color){32, 38, 52, 255});
+                DrawRectangleRounded(rect, 0.3f, 4, highlighted ? (Color){62, 92, 150, 255} : (Color){32, 38, 52, 255});
                 const float textWidth = static_cast<float>(MeasureText(text, px(20)));
                 DrawText(text, static_cast<int>(rect.x + (rect.width - textWidth) * 0.5f),
                          static_cast<int>(rect.y + (rect.height - static_cast<float>(px(20))) * 0.5f), px(20),
-                         over ? WHITE : (Color){186, 194, 210, 255});
+                         highlighted ? WHITE : (Color){186, 194, 210, 255});
             };
-            drawButton(yes, "Quit");
-            drawButton(no, "Not now");
+            drawButton(yes, "Quit", dialogChoice == 0);
+            drawButton(no, "Not now", dialogChoice == 1);
 
-            const std::string footer = (usingController ? pad.bottom : "Cross") + std::string(" to quit    -    ") +
+            const std::string footer = "Left / Right to choose    -    " +
+                                       std::string(usingController ? pad.bottom : "Cross") + " to confirm    -    " +
                                        (usingController ? pad.right : "Esc") + " to stay";
             drawCenteredLines({footer}, w * 0.5f, h - 46.0f * fs, px(17), (Color){120, 130, 150, 255}, 24.0f * fs);
             EndDrawing();
@@ -1230,17 +1288,10 @@ int main(int argc, char **argv)
                 break;
             }
 
-            const bool yesPressed =
-                IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE) ||
-                (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, yes)) ||
-                padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
-            const bool noPressed =
-                IsKeyPressed(KEY_ESCAPE) ||
-                (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, no)) ||
-                padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_RIGHT);
-            if (yesPressed)
+            const int picked = dialogPick(yes, no);
+            if (picked == 0)
                 break;
-            if (noPressed)
+            if (picked == 1)
                 quitAsk = false;
             continue;
         }
@@ -1302,19 +1353,19 @@ int main(int argc, char **argv)
             const float buttonW = 168.0f * fs, buttonH = 46.0f * fs, buttonGap = 34.0f * fs;
             const Rectangle startButton = {w * 0.5f - buttonW - buttonGap * 0.5f, h - 168.0f * fs, buttonW, buttonH};
             const Rectangle backButton = {w * 0.5f + buttonGap * 0.5f, startButton.y, buttonW, buttonH};
-            const auto drawButton = [&](const Rectangle &rect, const char *text)
+            const auto drawButton = [&](const Rectangle &rect, const char *text, bool highlighted)
             {
-                const bool over = CheckCollisionPointRec(mouse, rect);
-                DrawRectangleRounded(rect, 0.3f, 4, over ? (Color){62, 92, 150, 255} : (Color){32, 38, 52, 255});
+                DrawRectangleRounded(rect, 0.3f, 4, highlighted ? (Color){62, 92, 150, 255} : (Color){32, 38, 52, 255});
                 const float textWidth = static_cast<float>(MeasureText(text, px(20)));
                 DrawText(text, static_cast<int>(rect.x + (rect.width - textWidth) * 0.5f),
                          static_cast<int>(rect.y + (rect.height - static_cast<float>(px(20))) * 0.5f), px(20),
-                         over ? WHITE : (Color){186, 194, 210, 255});
+                         highlighted ? WHITE : (Color){186, 194, 210, 255});
             };
-            drawButton(startButton, "Start");
-            drawButton(backButton, "Not now");
+            drawButton(startButton, "Start", dialogChoice == 0);
+            drawButton(backButton, "Not now", dialogChoice == 1);
 
-            const std::string footer = (usingController ? pad.bottom : "Cross") + std::string(" to start    -    ") +
+            const std::string footer = "Left / Right to choose    -    " +
+                                       std::string(usingController ? pad.bottom : "Cross") + " to confirm    -    " +
                                        (usingController ? pad.right : "Esc") + " to go back";
             drawCenteredLines({footer}, w * 0.5f, h - 46.0f * fs, px(17), (Color){120, 130, 150, 255}, 24.0f * fs);
             EndDrawing();
@@ -1326,21 +1377,14 @@ int main(int argc, char **argv)
                 break;
             }
 
-            const bool start =
-                IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE) ||
-                (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, startButton)) ||
-                padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
-            const bool back =
-                IsKeyPressed(KEY_ESCAPE) ||
-                (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, backButton)) ||
-                padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_RIGHT);
-            if (back)
-                wizard = wizardFromPicker ? Wizard::Pick : Wizard::None;
-            else if (start)
+            const int picked = dialogPick(startButton, backButton);
+            if (picked == 0)
             {
                 wizard = Wizard::None;
                 startBuild(selected, wizardImage);
             }
+            else if (picked == 1)
+                wizard = wizardFromPicker ? Wizard::Pick : Wizard::None;
             continue;
         }
 
@@ -1434,6 +1478,7 @@ int main(int argc, char **argv)
                 wizardImage = games[selected].disc;
                 wizardLabel = games[selected].disc;
                 wizardFromPicker = false;
+                dialogChoice = 0; // Start
                 wizard = Wizard::Confirm;
             }
             else
@@ -1713,7 +1758,10 @@ int main(int argc, char **argv)
         }
         // Esc or Circle asks rather than quits.
         if (IsKeyPressed(KEY_ESCAPE) || padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
+        {
+            dialogChoice = 1; // Not now: this screen exists to catch accidents
             quitAsk = true;
+        }
     }
 
     if (jobThread.joinable())

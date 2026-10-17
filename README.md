@@ -29,6 +29,11 @@ spending an evening on it rather than after.
   Circle sits under a thumb. The small button beside the d-pad toggles fullscreen,
   which is what Select is for on a pad: out of the way, and never pressed by
   accident. Clicking the right stick in mutes the music, as `M` does.
+
+  The two confirmation screens are answered the way a console dialog is: move
+  between the options and Cross takes the one under the highlight. The build screen
+  starts on **Start**; the quit screen starts on **Not now**, because that screen
+  exists to catch accidents rather than to help them along.
 - **Fullscreen by default** (F11 swaps), and the whole menu scales to the
   display, so it fills a 1440p monitor rather than sitting small in the middle.
 - Launches whatever is already built, per the paths in `launcher.ini`.

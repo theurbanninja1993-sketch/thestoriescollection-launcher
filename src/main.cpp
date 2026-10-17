@@ -345,6 +345,7 @@ namespace
     struct PadNames
     {
         std::string bottom, right, left, top;
+        std::string select; // the small one beside the d-pad: Select, View, Minus
     };
 
     PadNames padNamesFor(int slot)
@@ -355,10 +356,10 @@ namespace
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         if (name.find("xbox") != std::string::npos || name.find("xinput") != std::string::npos ||
             name.find("steam") != std::string::npos)
-            return {"A", "B", "X", "Y"};
+            return {"A", "B", "X", "Y", "View"};
         if (name.find("switch") != std::string::npos || name.find("nintendo") != std::string::npos)
-            return {"B", "A", "Y", "X"}; // Nintendo numbers them the other way round
-        return {"Cross", "Circle", "Square", "Triangle"};
+            return {"B", "A", "Y", "X", "Minus"}; // Nintendo numbers them the other way round
+        return {"Cross", "Circle", "Square", "Triangle", "Select"};
     }
 
     PadNames padNames() { return padNamesFor(0); }
@@ -974,6 +975,10 @@ int main(int argc, char **argv)
     // one that is actually touched becomes the one the hints describe.
     int activePad = -1;
 
+    // Quitting is asked about rather than done. Circle sits under a thumb and Esc is
+    // one key away from nothing; neither should close a launcher by accident.
+    bool quitAsk = false;
+
     // The screens that do not reach the menu's input handling - the picker, the
     // confirmation, the build itself - read the pads for themselves, for the same
     // reason: whichever slot answers is the one in hand.
@@ -1179,6 +1184,65 @@ int main(int argc, char **argv)
             }
             continue;
         }
+        if (quitAsk)
+        {
+            const float w = static_cast<float>(GetScreenWidth());
+            const float h = static_cast<float>(GetScreenHeight());
+            const float fs = std::max(0.8f, std::min(2.5f, std::min(w / 1280.0f, h / 720.0f)));
+            const auto px = [fs](float v) { return static_cast<int>(std::lround(v * fs)); };
+
+            BeginDrawing();
+            ClearBackground((Color){12, 13, 17, 255});
+
+            const std::vector<std::string> heading = wrapText("Quit the launcher?", px(30), w * 0.8f);
+            drawCenteredLines(heading, w * 0.5f, h * 0.5f - 150.0f * fs, px(30), (Color){236, 240, 248, 255},
+                              38.0f * fs);
+            drawCenteredLines(wrapText("The games stay where they are, and anything already built is kept.",
+                                       px(17), w * 0.7f),
+                              w * 0.5f, h * 0.5f - 90.0f * fs, px(17), (Color){126, 134, 152, 255}, 24.0f * fs);
+
+            const Vector2 mouse = GetMousePosition();
+            const float buttonW = 168.0f * fs, buttonH = 46.0f * fs, buttonGap = 34.0f * fs;
+            const Rectangle yes = {w * 0.5f - buttonW - buttonGap * 0.5f, h * 0.5f + 20.0f * fs, buttonW, buttonH};
+            const Rectangle no = {w * 0.5f + buttonGap * 0.5f, yes.y, buttonW, buttonH};
+            const auto drawButton = [&](const Rectangle &rect, const char *text)
+            {
+                const bool over = CheckCollisionPointRec(mouse, rect);
+                DrawRectangleRounded(rect, 0.3f, 4, over ? (Color){62, 92, 150, 255} : (Color){32, 38, 52, 255});
+                const float textWidth = static_cast<float>(MeasureText(text, px(20)));
+                DrawText(text, static_cast<int>(rect.x + (rect.width - textWidth) * 0.5f),
+                         static_cast<int>(rect.y + (rect.height - static_cast<float>(px(20))) * 0.5f), px(20),
+                         over ? WHITE : (Color){186, 194, 210, 255});
+            };
+            drawButton(yes, "Quit");
+            drawButton(no, "Not now");
+
+            const std::string footer = (usingController ? pad.bottom : "Cross") + std::string(" to quit    -    ") +
+                                       (usingController ? pad.right : "Esc") + " to stay";
+            drawCenteredLines({footer}, w * 0.5f, h - 46.0f * fs, px(17), (Color){120, 130, 150, 255}, 24.0f * fs);
+            EndDrawing();
+
+            if (!screenshotPath.empty())
+            {
+                TakeScreenshot(screenshotPath.c_str());
+                std::fprintf(stderr, "[launcher] wrote %s\n", screenshotPath.c_str());
+                break;
+            }
+
+            const bool yesPressed =
+                IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE) ||
+                (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, yes)) ||
+                padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
+            const bool noPressed =
+                IsKeyPressed(KEY_ESCAPE) ||
+                (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, no)) ||
+                padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_RIGHT);
+            if (yesPressed)
+                break;
+            if (noPressed)
+                quitAsk = false;
+            continue;
+        }
         if (wizard == Wizard::Confirm)
         {
             const float w = static_cast<float>(GetScreenWidth());
@@ -1380,7 +1444,7 @@ int main(int argc, char **argv)
         }
         if ((IsKeyPressed(KEY_U) || padFetch) && games[selected].portConfigured)
             startJob(Job::Fetch, selected, fetchCommand(games[selected]), true);
-        if (IsKeyPressed(KEY_F11) && screenshotPath.empty())
+        if ((IsKeyPressed(KEY_F11) || padPressedAny(GAMEPAD_BUTTON_MIDDLE_LEFT)) && screenshotPath.empty())
         {
             ToggleFullscreen();
             // Leaving fullscreen leaves the window at the monitor's size, so put it
@@ -1600,10 +1664,10 @@ int main(int argc, char **argv)
         std::string footer = "Left / Right or the stick to choose    -    ";
         footer += games[selected].available ? ("Click or " + (usingController ? pad.bottom : "Enter") + " to play")
                                             : "this one is still being built";
-        footer += "    -    F11: fullscreen";
+        footer += "    -    " + std::string(usingController ? pad.select : "F11") + ": fullscreen";
         if (themesLoaded > 0)
             footer += musicMuted ? "    -    M: music off" : "    -    M: mute";
-        footer += "    -    Esc: quit";
+        footer += "    -    " + std::string(usingController ? pad.right : "Esc") + ": quit";
         const float footerWidth = static_cast<float>(MeasureText(footer.c_str(), px(18)));
         DrawText(footer.c_str(), static_cast<int>((width - footerWidth) * 0.5f), static_cast<int>(height - 46.0f * s),
                  px(18), (Color){120, 130, 150, 255});
@@ -1643,8 +1707,9 @@ int main(int argc, char **argv)
             std::fprintf(stderr, "[launcher] wrote %s\n", screenshotPath.c_str());
             break;
         }
-        if (IsKeyPressed(KEY_ESCAPE))
-            break;
+        // Esc or Circle asks rather than quits.
+        if (IsKeyPressed(KEY_ESCAPE) || padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
+            quitAsk = true;
     }
 
     if (jobThread.joinable())

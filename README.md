@@ -24,8 +24,11 @@ spending an evening on it rather than after.
 - The menu: two cards with **your own box art**, mouse hover and d-pad / stick
   navigation, click or Cross to play, Esc to quit. **Every action has a controller
   button as well as a key**, and the hints name whichever you are using: the bottom
-  face button plays, the left one fetches the source, the top one builds, and the
-  right one backs out or stops a build.
+  face button plays, the left one fetches the source, the top one builds, the right
+  one backs out or stops a build — and on the menu it asks before quitting, because
+  Circle sits under a thumb. The small button beside the d-pad toggles fullscreen,
+  which is what Select is for on a pad: out of the way, and never pressed by
+  accident.
 - **Fullscreen by default** (F11 swaps), and the whole menu scales to the
   display, so it fills a 1440p monitor rather than sitting small in the middle.
 - Launches whatever is already built, per the paths in `launcher.ini`.

@@ -268,6 +268,25 @@ namespace builder
             return result.str();
         }
 
+        // Copies a whole tree. std::filesystem::copy's directory semantics are
+        // fiddly about whether it copies into or over, so this walks it instead.
+        void copyTree(const std::string &from, const std::string &to)
+        {
+            std::error_code ec;
+            fs::create_directories(to, ec);
+            for (const fs::directory_entry &entry : fs::recursive_directory_iterator(from, ec))
+            {
+                const fs::path target = fs::path(to) / fs::relative(entry.path(), from, ec);
+                if (entry.is_directory())
+                    fs::create_directories(target, ec);
+                else if (entry.is_regular_file())
+                {
+                    fs::create_directories(target.parent_path(), ec);
+                    fs::copy_file(entry.path(), target, fs::copy_options::overwrite_existing, ec);
+                }
+            }
+        }
+
         // The generated code is installed by content, not by timestamp: the build
         // keys off timestamps, so rewriting 10,000 identical files would force a
         // full rebuild every single time.
@@ -427,12 +446,14 @@ namespace builder
         switch (step)
         {
         case StepTools: return "Tools";
+        case StepToolchain: return "Windows cross-compiler";
         case StepCheck: return "Check the disc";
         case StepExtract: return "Extract";
         case StepRecompile: return "Recompile";
         case StepInstall: return "Install";
         case StepCompile: return "Compile the port";
         case StepVu1: return "Learn the VU1 microprograms";
+        case StepWindows: return "Build and package Windows";
         default: return "";
         }
     }
@@ -442,15 +463,48 @@ namespace builder
         switch (step)
         {
         case StepTools: return "The first three stages call tools that a fresh download does not have yet.";
+        case StepToolchain:
+            return "llvm-mingw, fetched once (88 MB). The Windows build is cross-compiled, so its compiler runs here.";
         case StepCheck: return "The disc's own boot file is hashed and compared with the one the source expects.";
         case StepExtract: return "Every file is pulled off the disc. This is the long one.";
         case StepRecompile: return "The game's ELF becomes C++, which is what the port is: a translation of it.";
         case StepInstall: return "The generated code is copied into the runtime, without rewriting what has not changed.";
         case StepCompile: return "The port itself is built. This is the other long one.";
         case StepVu1: return "The VU1 microprograms live on the disc, so the game is run to record which ones it asks for.";
+        case StepWindows:
+            return "After the microprograms, and never before them - the Windows link needs them. Then everything the "
+                   "game needs is gathered into one folder to copy across.";
         default: return "";
         }
     }
+
+    std::vector<int> plan(bool windows)
+    {
+        std::vector<int> steps = {StepTools};
+        if (windows)
+            steps.push_back(StepToolchain);
+        for (int step : {StepCheck, StepExtract, StepRecompile, StepInstall, StepCompile, StepVu1})
+            steps.push_back(step);
+        if (windows)
+            steps.push_back(StepWindows);
+        return steps;
+    }
+
+    bool runningUnderWsl()
+    {
+#if defined(_WIN32)
+        return false;
+#else
+        // WSL says so in the kernel release string, and nothing else does.
+        const std::string release = readFile("/proc/sys/kernel/osrelease");
+        std::string lower = release;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return lower.find("microsoft") != std::string::npos || lower.find("wsl") != std::string::npos;
+#endif
+    }
+
+    std::string windowsOutDir(const std::string &portDir) { return join(portDir, "dist/windows"); }
 
     bool supported()
     {
@@ -477,9 +531,11 @@ namespace builder
 
     // ------------------------------------------------------------------ running
 
-    bool run(const std::string &portDir, const std::string &image, const Recipe &recipe, const Callbacks &cb)
+    bool run(const std::string &portDir, const std::string &image, const Recipe &recipe, const Targets &targets,
+             const Callbacks &cb)
     {
         const std::string buildDir = join(portDir, "build"); // the same tree build.sh uses
+        const std::string buildWin = join(portDir, "build-win"); // the cross-compile's own tree
         const std::string work = buildDir;
         const bool imageIsFolder = fs::is_directory(image);
         const std::string discDir = imageIsFolder ? image : join(work, "disc");
@@ -555,6 +611,84 @@ namespace builder
         for (const std::string &tool : {ps2Recomp, ps2Iso, vu1Recomp})
             if (!need(tool))
                 return false;
+
+        // ------------------------------------------------------------ toolchain
+        // A Windows build needs a compiler that runs here and targets there, and one
+        // is fetched once into the source and reused. Anything already on this machine
+        // wins over fetching: one named, one the environment points at, the one an
+        // existing build-win was configured with, then our own copy.
+        const bool cross = targets.windows;
+        std::string toolchainRoot = targets.toolchain;
+        if (cross)
+        {
+            if (!step(StepToolchain))
+                return false;
+
+            const std::string asset = "llvm-mingw-20241217-ucrt-ubuntu-20.04-x86_64";
+            const std::string toolchains = join(portDir, "toolchains");
+            auto works = [&](const std::string &root)
+            { return !root.empty() && fs::exists(join(root, "bin/x86_64-w64-mingw32-clang++"), ec); };
+
+            if (!works(toolchainRoot))
+            {
+                const char *environment = std::getenv("LLVM_MINGW_ROOT");
+                if (environment != nullptr && works(environment))
+                    toolchainRoot = environment;
+            }
+            if (!works(toolchainRoot))
+            {
+                const std::string cache = readFile(join(buildWin, "CMakeCache.txt"));
+                const size_t at = cache.find("LLVM_MINGW_ROOT:");
+                const size_t equals = at == std::string::npos ? std::string::npos : cache.find('=', at);
+                if (equals != std::string::npos)
+                {
+                    const size_t end = cache.find('\n', equals);
+                    const std::string cached =
+                        trim(cache.substr(equals + 1, end == std::string::npos ? std::string::npos : end - equals - 1));
+                    if (works(cached))
+                        toolchainRoot = cached;
+                }
+            }
+            if (!works(toolchainRoot) && works(join(toolchains, asset)))
+                toolchainRoot = join(toolchains, asset);
+
+            if (!works(toolchainRoot))
+            {
+                if (cb.onLine)
+                    cb.onLine("fetching the cross-compiler, 88 MB, once");
+                fs::create_directories(toolchains, ec);
+                const std::string archive = join(toolchains, asset + ".tar.xz");
+                const std::string url =
+                    "https://github.com/mstorsjo/llvm-mingw/releases/download/20241217/" + asset + ".tar.xz";
+                if ((!fs::exists(archive, ec) && shell({"curl", "-fL", "--retry", "3", "-o", archive, url}, "") != 0))
+                {
+                    if (cb.onLine)
+                        cb.onLine("could not download the cross-compiler");
+                    return false;
+                }
+                if (cb.onLine)
+                    cb.onLine("unpacking the cross-compiler, which takes a moment");
+                if (shell({"tar", "-xJf", archive, "-C", toolchains}, "") != 0)
+                    return false;
+                toolchainRoot = join(toolchains, asset);
+                if (!works(toolchainRoot))
+                {
+                    if (cb.onLine)
+                        cb.onLine("the cross-compiler did not unpack where expected");
+                    return false;
+                }
+            }
+            if (cb.onLine)
+                cb.onLine("cross-compiler: " + toolchainRoot);
+
+            // Configured here rather than at the end because it takes minutes and
+            // nothing about it depends on the game having been compiled.
+            if (shell({"cmake", "-S", portDir, "-B", buildWin, "-DCMAKE_BUILD_TYPE=Release",
+                       "-DCMAKE_TOOLCHAIN_FILE=" + join(portDir, "cmake/toolchains/llvm-mingw-x86_64.cmake"),
+                       "-DLLVM_MINGW_ROOT=" + toolchainRoot},
+                      "") != 0)
+                return false;
+        }
 
         // ---------------------------------------------------------------- check
         if (!step(StepCheck))
@@ -754,6 +888,67 @@ namespace builder
                 rebuild.push_back("--clean-first");
             if (shell(rebuild, "") != 0)
                 return false;
+        }
+
+        // -------------------------------------------------------------- windows
+        if (cross)
+        {
+            if (!step(StepWindows))
+                return false;
+
+            // Configured *with the VU1 directory*, and after the passes rather than
+            // before them. That is not tidiness: a Windows link without the VU1
+            // programs on the link line resolves raylib's CloseWindow and ShowCursor
+            // against USER32's copies and stops with duplicate symbols.
+            if (shell({"cmake", "-S", portDir, "-B", buildWin, "-DCMAKE_BUILD_TYPE=Release",
+                       "-DCMAKE_TOOLCHAIN_FILE=" + join(portDir, "cmake/toolchains/llvm-mingw-x86_64.cmake"),
+                       "-DLLVM_MINGW_ROOT=" + toolchainRoot, "-DPS2X_VU1_PROGRAMS=" + vu1Dir},
+                      "") != 0)
+                return false;
+            if (shell({"cmake", "--build", buildWin, "--target", "ps2EntryRunner", "-j", std::to_string(cores())},
+                      "") != 0)
+                return false;
+
+            // Then gather everything a Windows machine needs into one folder, because
+            // the runner looks for the game's files beside itself. This copy is why
+            // the step takes a while: the game's own files are most of two gigabytes.
+            const std::string out = windowsOutDir(portDir);
+            const std::string from = join(buildWin, "ps2xRuntime");
+            if (!fs::exists(join(from, "ps2EntryRunner.exe"), ec))
+            {
+                if (cb.onLine)
+                    cb.onLine("the Windows build produced no exe");
+                return false;
+            }
+            fs::remove_all(out, ec);
+            fs::create_directories(out, ec);
+            fs::copy_file(join(from, "ps2EntryRunner.exe"), join(out, "ps2EntryRunner.exe"),
+                          fs::copy_options::overwrite_existing, ec);
+            for (const fs::directory_entry &entry : fs::directory_iterator(from, ec))
+            {
+                const std::string name = entry.path().filename().string();
+                const bool wanted = entry.path().extension() == ".dll" || name == "custom_logo.png";
+                if (entry.is_regular_file() && wanted)
+                    fs::copy_file(entry.path(), fs::path(out) / name, fs::copy_options::overwrite_existing, ec);
+            }
+            for (const std::string &asset : {"prompts", "music", "mods"})
+                if (fs::exists(join(from, asset), ec))
+                    copyTree(join(from, asset), join(out, asset));
+            writeFile(join(out, "portable.txt"), "");
+            writeFile(join(out, "play.cmd"),
+                      "@echo off\r\n"
+                      "rem Runs the port from this folder, whatever the current directory is.\r\n"
+                      "cd /d \"%~dp0\"\r\n"
+                      "ps2EntryRunner.exe %*\r\n");
+            const std::string readme = readFile(join(portDir, "docs/PORTABLE.txt"));
+            if (!readme.empty())
+                writeFile(join(out, "README.txt"), readme);
+
+            if (cb.onLine)
+                cb.onLine("copying the game's files, which is most of the wait");
+            copyTree(discDir, join(out, "game"));
+            if (cb.onLine)
+                cb.onLine("the Windows build is in " + out);
         }
 
         return true;

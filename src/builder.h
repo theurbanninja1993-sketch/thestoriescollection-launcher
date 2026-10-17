@@ -56,17 +56,38 @@ namespace builder
     enum Step
     {
         StepTools,     // configure, and build the tools every later step calls
+        StepToolchain, // fetch and configure the Windows cross-compiler
         StepCheck,     // is this the right disc?
         StepExtract,   // pull the files off it
         StepRecompile, // the game's ELF, into C++
         StepInstall,   // that C++ into the runtime
-        StepCompile,   // compile the port
+        StepCompile,   // compile the port for this machine
         StepVu1,       // learn the VU1 microprograms by running the game, twice
+        StepWindows,   // cross-compile Windows, and package it to hand over
         StepCount
     };
 
     const char *stepName(int step);
     const char *stepNote(int step);
+
+    // The steps a run will actually take, in order: the Windows ones only when it is
+    // asked for, so the list on screen is exactly what is going to happen.
+    std::vector<int> plan(bool windows);
+
+    // The Windows build is a cross-compile, so its compiler runs on this machine
+    // rather than that one: llvm-mingw, fetched once, ~88 MB.
+    struct Targets
+    {
+        bool windows = false;
+        std::string toolchain; // a specific llvm-mingw to use, if one is named
+    };
+
+    // True under WSL, where the point of building anything is the Windows binary.
+    bool runningUnderWsl();
+
+    // Where a cross-build leaves something that can be copied to a Windows machine:
+    // the exe, its DLLs and the game's files, all in one folder.
+    std::string windowsOutDir(const std::string &portDir);
 
     // Whether this platform can run a build at all. The port's Windows binary is
     // cross-compiled from Linux and has never been built on Windows, so there is no
@@ -92,7 +113,8 @@ namespace builder
 
     // Runs every step in order. False means it did not finish: either it failed or
     // it was stopped. The last line reported says which.
-    bool run(const std::string &portDir, const std::string &image, const Recipe &recipe, const Callbacks &cb);
+    bool run(const std::string &portDir, const std::string &image, const Recipe &recipe, const Targets &targets,
+             const Callbacks &cb);
 
     // Stops whatever is running, taking its whole process tree: a compiler tree is
     // not one process.

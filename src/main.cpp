@@ -121,6 +121,8 @@ namespace
     {
         float musicVolume = 0.6f; // 0 turns menu music off entirely
         bool fullscreen = true;   // a front end is meant to sit on the screen
+        int crossCompile = -1;    // -1 unset: under WSL that means yes, elsewhere no
+        std::string toolchain;    // a specific llvm-mingw to cross-compile with
     };
 
     // A deliberately small key=value reader: one "[game:<id>]" section per game,
@@ -169,6 +171,10 @@ namespace
                     settings.musicVolume = static_cast<float>(std::atof(value.c_str()));
                 else if (key == "fullscreen")
                     settings.fullscreen = std::atoi(value.c_str()) != 0;
+                else if (key == "windows")
+                    settings.crossCompile = std::atoi(value.c_str()) != 0 ? 1 : 0;
+                else if (key == "toolchain")
+                    settings.toolchain = value;
                 continue;
             }
             if (current == nullptr)
@@ -703,6 +709,9 @@ int main(int argc, char **argv)
     std::atomic<bool> buildStop{false};
     std::atomic<bool> buildOk{false};
     double buildStarted = 0.0;
+    bool buildCrosses = false;       // whether this run also cross-compiles Windows
+    std::vector<int> buildPlan;      // the steps it will take, in order
+    int buildPlanAt = 0;             // which of them is running
 
     auto beginJob = [&](Job kind, int index) -> bool
     {
@@ -740,7 +749,13 @@ int main(int argc, char **argv)
     {
         if (!beginJob(Job::Build, index))
             return;
-        buildStep = 0;
+        // WSL is a Linux machine running on a Windows one, so the build that is any
+        // use there is the Windows one. Everywhere else it is this machine's own,
+        // unless the config says otherwise either way.
+        buildCrosses = settings.crossCompile < 0 ? builder::runningUnderWsl() : settings.crossCompile != 0;
+        buildPlan = builder::plan(buildCrosses);
+        buildPlanAt = 0;
+        buildStep = buildPlan.empty() ? -1 : buildPlan.front();
         buildStop = false;
         buildOk = false;
         buildStarted = GetTime();
@@ -764,6 +779,7 @@ int main(int argc, char **argv)
             callbacks.onStep = [&](int step)
             {
                 buildStep = step;
+                buildPlanAt = static_cast<int>(std::find(buildPlan.begin(), buildPlan.end(), step) - buildPlan.begin());
                 std::fprintf(stderr, "[build] %s\n", builder::stepName(step));
             };
             callbacks.onLine = [&](const std::string &line)
@@ -774,7 +790,10 @@ int main(int argc, char **argv)
                 std::lock_guard<std::mutex> lock(jobMutex);
                 jobDetail = line;
             };
-            buildOk = builder::run(games[index].portDir, image, recipe, callbacks);
+            builder::Targets targets;
+            targets.windows = buildCrosses;
+            targets.toolchain = settings.toolchain;
+            buildOk = builder::run(games[index].portDir, image, recipe, targets, callbacks);
             jobStatus = buildOk.load() ? 0 : -1;
             jobKind = static_cast<int>(Job::None);
         });
@@ -797,32 +816,35 @@ int main(int argc, char **argv)
         // answer to "how long is this going to be".
         if (kind == Job::Build)
         {
-            const int current = buildStep.load();
+            const int current = buildPlanAt;
             const float rowHeight = 32.0f * fs;
             const std::vector<std::string> title = wrapText("Building " + games[jobGame].title, px(26), w * 0.8f);
-            float y = h * 0.5f - static_cast<float>(builder::StepCount) * rowHeight * 0.5f - 70.0f * fs;
+            float y = h * 0.5f - static_cast<float>(buildPlan.size()) * rowHeight * 0.5f - 96.0f * fs;
             drawCenteredLines(title, w * 0.5f, y, px(26), (Color){236, 240, 248, 255}, 34.0f * fs);
-            y += static_cast<float>(title.size()) * 34.0f * fs + 26.0f * fs;
+            y += static_cast<float>(title.size()) * 34.0f * fs + 8.0f * fs;
+            drawCenteredLines({buildCrosses ? "for this machine, and for Windows" : "for this machine"}, w * 0.5f, y,
+                              px(17), (Color){126, 134, 152, 255}, 24.0f * fs);
+            y += 40.0f * fs;
 
-            const float left = w * 0.5f - 210.0f * fs;
-            for (int i = 0; i < static_cast<int>(builder::StepCount); ++i)
+            const float left = w * 0.5f - 230.0f * fs;
+            for (size_t i = 0; i < buildPlan.size(); ++i)
             {
-                const bool done = i < current;
-                const bool running = i == current;
+                const bool done = static_cast<int>(i) < current;
+                const bool running = static_cast<int>(i) == current;
                 const Color colour = done      ? (Color){116, 170, 132, 255}
                                      : running ? (Color){240, 200, 90, 255}
                                                : (Color){92, 100, 118, 255};
                 const std::string text = std::string(done ? "[done] " : running ? "[>]    " : "[ ]    ") +
-                                         builder::stepName(i);
+                                         builder::stepName(buildPlan[i]);
                 DrawText(text.c_str(), static_cast<int>(left), static_cast<int>(y), px(20), colour);
                 y += rowHeight;
             }
 
             y += 6.0f * fs;
-            if (current >= 0 && current < static_cast<int>(builder::StepCount))
+            if (current >= 0 && current < static_cast<int>(buildPlan.size()))
             {
-                drawCenteredLines(wrapText(builder::stepNote(current), px(16), w * 0.7f), w * 0.5f, y, px(16),
-                                  (Color){126, 134, 152, 255}, 22.0f * fs);
+                drawCenteredLines(wrapText(builder::stepNote(buildPlan[current]), px(16), w * 0.7f), w * 0.5f, y,
+                                  px(16), (Color){126, 134, 152, 255}, 22.0f * fs);
                 y += 52.0f * fs;
             }
             std::string detail;

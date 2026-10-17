@@ -71,15 +71,28 @@ Then press **B** and the wizard builds it, showing where it is as it goes:
 | Step | What it does | Roughly |
 |---|---|---|
 | Tools | configures and builds the tools every later step calls | ~2 min, the first time only |
+| Windows cross-compiler | fetches llvm-mingw and configures the cross-build | ~3 min and 88 MB, the first time only |
 | Check the disc | hashes the disc's boot file against the one the source expects | instant |
 | Extract | pulls the files off it | ~17 min from a disc, instant from a folder |
 | Recompile | the game's ELF into C++ | ~1 s |
 | Install | that C++ into the runtime | ~10 s |
 | Compile the port | builds it | ~7 min |
-| Learn the VU1 microprograms | runs the game to record which ones it asks for, twice | ~4 min |
+| Learn the VU1 microprograms | runs the game to record which ones it asks for, twice | ~15 min |
+| Build and package Windows | cross-compiles it, then gathers one folder to copy across | ~15 min |
 
-From nothing that is roughly 20 to 25 minutes, most of it the compiler. It needs a
+From nothing that is roughly 20 to 25 minutes, most of it the compiler. The last
+two steps are only there when a Windows build is asked for. It needs a
 C++ toolchain and cmake, and produces the runner the menu then launches.
+
+**Windows builds.** Set `windows=1` under `[launcher]` and it also cross-compiles a
+Windows binary, then gathers the exe, its DLLs and the game's files into
+`dist/windows/`: one folder to copy to a Windows machine. Under WSL that is the
+default, because it is the build that is any use there.
+
+That build is a cross-compile — the compiler runs on Linux and targets Windows — so
+llvm-mingw is fetched once, 88 MB, into `toolchains/` inside the source. It has to
+come after the VU1 step and with the VU1 programs on the link line; the port's
+handoff notes say why, and it is not obvious.
 
 There is deliberately no file browser. The wizard looks for optical drives, and for
 `.iso`/`.bin` files in a `discs/` folder beside the launcher — put the image there,

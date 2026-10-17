@@ -1,4 +1,4 @@
-# ps2x-launcher
+# The Stories Collection launcher
 
 The front end for the recompiled PS2 GTA games. One window, one menu, and each
 game is a card you click.

@@ -1,4 +1,4 @@
-// ps2x-launcher - the front end for the ported GTA PS2 games.
+// The Stories Collection launcher - the front end for the ported PS2 games.
 //
 // Phase 1: the game menu. Two cards with the player's own box art, mouse and
 // controller navigation, click / Cross to launch. The games and their paths come

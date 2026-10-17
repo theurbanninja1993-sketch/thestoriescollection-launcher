@@ -18,3 +18,4 @@ port/
 launcher.dev.ini
 build-release/
 dist/
+build-win/

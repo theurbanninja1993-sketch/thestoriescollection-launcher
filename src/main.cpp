@@ -347,9 +347,9 @@ namespace
         std::string bottom, right, left, top;
     };
 
-    PadNames padNames()
+    PadNames padNamesFor(int slot)
     {
-        const char *raw = IsGamepadAvailable(0) ? GetGamepadName(0) : nullptr;
+        const char *raw = IsGamepadAvailable(slot) ? GetGamepadName(slot) : nullptr;
         std::string name = raw != nullptr ? raw : "";
         std::transform(name.begin(), name.end(), name.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -360,6 +360,8 @@ namespace
             return {"B", "A", "Y", "X"}; // Nintendo numbers them the other way round
         return {"Cross", "Circle", "Square", "Triangle"};
     }
+
+    PadNames padNames() { return padNamesFor(0); }
 
     // The one-line summary drawn under a card, or "" when there is nothing to say.
     // `fetch` and `build` are what to tell the player to press, which depends on
@@ -509,6 +511,7 @@ int main(int argc, char **argv)
     std::string screenshotPath;
     int startSelection = -1;
     int launchIndex = -1;
+    bool listPads = false;
     for (int i = 1; i < argc; ++i)
     {
         if (std::strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc)
@@ -517,6 +520,8 @@ int main(int argc, char **argv)
             startSelection = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--launch") == 0 && i + 1 < argc)
             launchIndex = std::atoi(argv[++i]);
+        else if (std::strcmp(argv[i], "--pads") == 0)
+            listPads = true; // answered after the window is up: pads need it
         else if (std::strcmp(argv[i], "--version") == 0)
         {
             std::printf("ps2x-launcher %s\n", PS2X_LAUNCHER_VERSION);
@@ -568,8 +573,41 @@ int main(int argc, char **argv)
         return std::system(command.c_str()) == 0 ? 0 : 1;
     }
 
-    SetConfigFlags(FLAG_WINDOW_HIGHDPI | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
+    // --pads needs the window to exist, because that is what initialises the pad
+    // support; it does not need to be seen.
+    SetConfigFlags(FLAG_WINDOW_HIGHDPI | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT |
+                   (listPads ? FLAG_WINDOW_HIDDEN : 0));
     InitWindow(1280, 720, "The Stories Collection - Launcher");
+    if (listPads)
+    {
+        // raylib fills its gamepad state during a poll, which normally happens in the
+        // frame loop. Asking before the first poll reports nothing at all - which is
+        // what this did until a DualSense was finally plugged in to test with.
+        PollInputEvents();
+        for (int settle = 0; settle < 4; ++settle)
+        {
+            PollInputEvents();
+            WaitTime(0.1);
+        }
+
+        // What the launcher can see, and what it would call the buttons. For working
+        // out why a pad does not behave: this is the same naming the hints use.
+        bool found = false;
+        for (int slot = 0; slot < 4; ++slot)
+        {
+            if (!IsGamepadAvailable(slot))
+                continue;
+            found = true;
+            const PadNames names = padNamesFor(slot);
+            std::printf("%d: %s\n   axes=%d  bottom=%s  right=%s  left=%s  top=%s\n", slot, GetGamepadName(slot),
+                        GetGamepadAxisCount(slot), names.bottom.c_str(), names.right.c_str(), names.left.c_str(),
+                        names.top.c_str());
+        }
+        if (!found)
+            std::printf("no controllers connected\n");
+        CloseWindow();
+        return 0;
+    }
     SetTargetFPS(60);
     SetExitKey(KEY_NULL);
     // Fullscreen by default: this is a front end meant to sit on the screen like a
@@ -929,13 +967,35 @@ int main(int argc, char **argv)
     bool wizardFromPicker = false; // so backing out returns to the list
     Vector2 lastWizardMouse{};
 
-    const int gamepad = 0; // the pad the launcher reads; it only ever uses one
+    // Which pad the player is on. It cannot simply be the first one: on a desktop a
+    // gaming keyboard and a mouse dongle both claim a joystick slot - this machine's
+    // keyboard takes two - and the launcher spent its life reading that as the
+    // controller while a DualSense sat in slot 2 ignored. Every slot is read, and the
+    // one that is actually touched becomes the one the hints describe.
+    int activePad = -1;
+
+    // The screens that do not reach the menu's input handling - the picker, the
+    // confirmation, the build itself - read the pads for themselves, for the same
+    // reason: whichever slot answers is the one in hand.
+    auto padPressedAny = [&activePad](int button) -> bool
+    {
+        for (int slot = 0; slot < 4; ++slot)
+        {
+            if (IsGamepadAvailable(slot) && IsGamepadButtonPressed(slot, button))
+            {
+                activePad = slot;
+                return true;
+            }
+        }
+        return false;
+    };
 
     while (true)
     {
         // Which names this pad's buttons go by, read once a frame so a controller
-        // plugged in or swapped mid-session is picked up.
-        const PadNames pad = padNames();
+        // plugged in or swapped mid-session is picked up. Until one has been touched,
+        // the first slot is the best guess there is.
+        const PadNames pad = padNamesFor(activePad >= 0 ? activePad : 0);
 
         // Away from the menu. Closing the window is ignored on purpose: the work is
         // still going, and quitting now would leave a game running or a clone half
@@ -947,7 +1007,7 @@ int main(int argc, char **argv)
             // skips what is already done.
             const bool stopPressed =
                 IsKeyPressed(KEY_ESCAPE) ||
-                (IsGamepadAvailable(gamepad) && IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT));
+                padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_RIGHT);
             if (jobKind.load() == static_cast<int>(Job::Build) && stopPressed)
             {
                 buildStop = true;
@@ -1085,7 +1145,7 @@ int main(int argc, char **argv)
 
             const bool backPressed =
                 IsKeyPressed(KEY_ESCAPE) ||
-                (IsGamepadAvailable(gamepad) && IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT));
+                padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_RIGHT);
             if (backPressed)
                 wizard = Wizard::None;
             if (choosable)
@@ -1104,8 +1164,7 @@ int main(int argc, char **argv)
                 if (IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_RIGHT))
                     sourcePick = (sourcePick + 1) % count;
                 bool choose = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE) ||
-                              (IsGamepadAvailable(gamepad) &&
-                               IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_DOWN));
+                              padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
                 if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && sourcePick >= 0 &&
                     sourcePick < static_cast<int>(sourceRects.size()) &&
                     CheckCollisionPointRec(mouse, sourceRects[sourcePick]))
@@ -1205,11 +1264,11 @@ int main(int argc, char **argv)
             const bool start =
                 IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE) ||
                 (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, startButton)) ||
-                (IsGamepadAvailable(gamepad) && IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_DOWN));
+                padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
             const bool back =
                 IsKeyPressed(KEY_ESCAPE) ||
                 (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, backButton)) ||
-                (IsGamepadAvailable(gamepad) && IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT));
+                padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_RIGHT);
             if (back)
                 wizard = wizardFromPicker ? Wizard::Pick : Wizard::None;
             else if (start)
@@ -1272,20 +1331,31 @@ int main(int argc, char **argv)
         // button plays, the left one fetches, the top one builds, and the right one
         // backs out or stops a build. Square/X and Triangle/Y are the ones the pad in
         // your hand calls them.
-        bool padFetch = false;
-        bool padBuild = false;
-        if (IsGamepadAvailable(gamepad))
+        // Whichever slot was touched last is the pad in hand, so a controller that is
+        // not the first device on the system still drives the menu.
+        for (int slot = 0; slot < 4; ++slot)
         {
-            padFetch = IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_LEFT);
-            padBuild = IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_UP);
-            if (padFetch || padBuild || IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_DOWN) ||
-                IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT) ||
-                IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_MIDDLE_RIGHT) ||
-                IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_LEFT_FACE_LEFT) ||
-                IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_LEFT_FACE_RIGHT) ||
-                std::fabs(GetGamepadAxisMovement(gamepad, GAMEPAD_AXIS_LEFT_X)) > 0.5f)
+            if (!IsGamepadAvailable(slot))
+                continue;
+            const bool touched =
+                IsGamepadButtonPressed(slot, GAMEPAD_BUTTON_LEFT_FACE_LEFT) ||
+                IsGamepadButtonPressed(slot, GAMEPAD_BUTTON_LEFT_FACE_RIGHT) ||
+                IsGamepadButtonPressed(slot, GAMEPAD_BUTTON_RIGHT_FACE_DOWN) ||
+                IsGamepadButtonPressed(slot, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT) ||
+                IsGamepadButtonPressed(slot, GAMEPAD_BUTTON_RIGHT_FACE_LEFT) ||
+                IsGamepadButtonPressed(slot, GAMEPAD_BUTTON_RIGHT_FACE_UP) ||
+                IsGamepadButtonPressed(slot, GAMEPAD_BUTTON_MIDDLE_RIGHT) ||
+                std::fabs(GetGamepadAxisMovement(slot, GAMEPAD_AXIS_LEFT_X)) > 0.5f;
+            if (touched)
+            {
+                activePad = slot;
                 usingController = true;
+            }
         }
+
+        const int gamepad = activePad;
+        const bool padFetch = gamepad >= 0 && IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_LEFT);
+        const bool padBuild = gamepad >= 0 && IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_UP);
         if (IsKeyPressed(KEY_B) || padBuild)
         {
             if (!games[selected].portConfigured || games[selected].portLocal.empty() || !builder::supported())
@@ -1319,7 +1389,7 @@ int main(int argc, char **argv)
                 SetWindowSize(1280, 720);
         }
 
-        if (IsGamepadAvailable(gamepad))
+        if (gamepad >= 0)
         {
             if (IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_LEFT_FACE_LEFT))
                 selected = (selected + static_cast<int>(games.size()) - 1) % static_cast<int>(games.size());

@@ -149,6 +149,9 @@ turn menu music off entirely.
 
 ## Handy flags
 
+- `--pads` — list the controllers the launcher can see, with the names it gives
+  their buttons. For working out why a pad is not behaving.
+
 - `--config <file>` — read a different config instead of `launcher.ini`.
 - `--screenshot <file.png>` — render one frame and exit. Always windowed, at
   1280x720, so a capture is the same size whatever the display. Used to check the

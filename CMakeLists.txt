@@ -20,7 +20,9 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(raylib)
 
-add_executable(ps2x_launcher src/main.cpp)
+# builder.cpp is the build wizard's engine: the steps that turn a fetched source
+# plus the player's disc into a game.
+add_executable(ps2x_launcher src/main.cpp src/builder.cpp src/builder.h)
 target_link_libraries(ps2x_launcher PRIVATE raylib)
 
 # The launcher is meant to sit in a folder next to the games it starts, so the

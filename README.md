@@ -34,6 +34,9 @@ spending an evening on it rather than after.
 - **It fetches the port's source for you.** Press `U` on a card and the launcher
   downloads or updates that game's source itself, so this repository is the whole
   download. Source only — never a built game. The card says where it stands.
+- **It builds the game for you.** Press `B` on a card whose source you have
+  fetched and a wizard runs the port's whole pipeline against your own disc, showing
+  which step it is on as it goes and letting you stop it.
 - **Playing a game is a round trip.** Choosing one blanks the screen while the
   game runs and hands it the foreground; when the game closes, however it was
   closed, the menu comes back lit with its theme playing again. The game's own
@@ -63,14 +66,40 @@ whole download**. Sit on a card and press `U`. The card reports where its source
 stands — `source not fetched`, `source update available`, or the revision it
 already has — and an update is only ever taken when you ask for it.
 
-Then build it, from the folder it arrived in:
+Then press **B** and the wizard builds it, showing where it is as it goes:
+
+| Step | What it does | Roughly |
+|---|---|---|
+| Tools | configures and builds the tools every later step calls | ~2 min, the first time only |
+| Check the disc | hashes the disc's boot file against the one the source expects | instant |
+| Extract | pulls the files off it | ~17 min from a disc, instant from a folder |
+| Recompile | the game's ELF into C++ | ~1 s |
+| Install | that C++ into the runtime | ~10 s |
+| Compile the port | builds it | ~7 min |
+| Learn the VU1 microprograms | runs the game to record which ones it asks for, twice | ~4 min |
+
+From nothing that is roughly 20 to 25 minutes, most of it the compiler. It needs a
+C++ toolchain and cmake, and produces the runner the menu then launches.
+
+There is deliberately no file browser. The wizard looks for optical drives, and for
+`.iso`/`.bin` files in a `discs/` folder beside the launcher — put the image there,
+or insert the disc and press `B`. A `disc=` line in `launcher.ini` names a specific
+one instead, which skips the search entirely.
+
+`Esc` stops a build. If that catches a compiler mid-write, the next build notices
+and cleans what it touched, rather than trusting a half-written file that cmake
+would otherwise consider up to date.
+
+The same pipeline runs from a terminal, which is what packaging and cross-compiling
+use:
 
 ```sh
 cd port/vcs && ./build.sh --image /dev/sr0     # or a .iso / folder you have
 ```
 
-That needs a C++ toolchain and cmake, and takes roughly 20 minutes. It produces
-`port/vcs/dist/`, which is exactly what the menu launches.
+**All of this is Linux.** The Windows port is cross-compiled from Linux and has
+never been built on Windows, so there is no Windows build for the wizard to drive
+yet — fetching and playing work there, building does not.
 
 ## Building the launcher itself
 

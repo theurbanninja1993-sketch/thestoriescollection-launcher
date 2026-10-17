@@ -10,6 +10,8 @@
 // phase 2 is where forms and widgets will actually earn their keep.
 #include "raylib.h"
 
+#include "builder.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -100,6 +102,9 @@ namespace
         std::string portUrl;
         std::string portDir;  // where it is kept
         std::string portRef;  // branch or tag
+        std::string disc;     // an explicit disc/iso/folder, skipping the picker
+        bool exeConfigured = false;  // named in the config, so never derived over
+        bool dataConfigured = false;
         bool portConfigured = false;
         std::string portLocal;  // revision on disk ("" = not fetched)
         std::string portRemote; // revision the remote has ("" = not known)
@@ -184,6 +189,8 @@ namespace
                 current->portDir = value;
             else if (key == "port_ref")
                 current->portRef = value;
+            else if (key == "disc")
+                current->disc = value;
             else if (key == "available")
                 current->available = std::atoi(value.c_str()) != 0;
         }
@@ -304,6 +311,35 @@ namespace
         return "git ls-remote \"" + game.portUrl + "\" \"" + portRefOf(game) + "\" 2>&1";
     }
 
+    // Where a built game ended up, so nobody has to write these into the config.
+    // A portable folder (dist/, which build.sh makes) carries its own copy of the
+    // game files and the runner finds them beside itself. Otherwise the wizard's own
+    // build tree has both. An explicit exe= in the config still wins over either.
+    void derivePaths(Game &game)
+    {
+        if (!game.portConfigured || !game.exe.empty())
+            return;
+        const std::string dist = game.portDir + "/dist/" + platformFolder();
+        const std::string distRunner = dist + "/" + runnerName();
+        if (FileExists(distRunner.c_str()))
+        {
+            game.exe = distRunner;
+            return; // the game files are in that folder too, and found by name
+        }
+        game.exe = builder::builtRunner(game.portDir);
+#if defined(PS2X_LAUNCHER_WINDOWS)
+        game.exe += ".exe";
+#endif
+        if (game.data.empty())
+        {
+            const builder::Recipe recipe = builder::readRecipe(game.portDir);
+            if (recipe.ok)
+                game.data = builder::builtGameDir(game.portDir) + "/" + recipe.bootFile;
+        }
+    }
+
+    bool gameIsBuilt(const Game &game) { return !game.exe.empty() && FileExists(game.exe.c_str()); }
+
     std::string shortRevision(const std::string &revision)
     {
         return revision.size() > 7 ? revision.substr(0, 7) : revision;
@@ -318,7 +354,9 @@ namespace
             return "source not fetched - press U";
         if (!game.portRemote.empty() && game.portRemote != game.portLocal)
             return "source update available - press U";
-        return "source ready (" + shortRevision(game.portLocal) + ")";
+        if (!gameIsBuilt(game))
+            return "not built - press B";
+        return "ready";
     }
 
     // ---------------------------------------------------------------- launch
@@ -474,15 +512,12 @@ int main(int argc, char **argv)
     // relative path is beside the config, so a release folder moves as one unit.
     for (Game &game : games)
     {
-        // A game whose source the launcher fetches also gets its paths for free: a
-        // build puts the runner and the player's own game files in a known place, so
-        // neither has to be written into the config by hand.
         game.portConfigured = !game.portUrl.empty();
         game.portDir = resolve(base, game.portDir.empty() ? ("port/" + game.id) : game.portDir);
-        if (game.portConfigured && game.exe.empty())
-            game.exe = game.portDir + "/dist/" + platformFolder() + "/" + runnerName();
-        if (game.portConfigured && game.data.empty())
-            game.data = game.portDir + "/dist/" + platformFolder() + "/game";
+        game.disc = resolve(base, game.disc);
+        game.exeConfigured = !game.exe.empty();
+        game.dataConfigured = !game.data.empty();
+        derivePaths(game);
 
         game.exe = resolve(base, game.exe);
         game.data = resolve(base, game.data);
@@ -651,7 +686,7 @@ int main(int argc, char **argv)
     // One background job at a time: the game, or fetching a port's source. Waiting
     // in a thread rather than blocking the loop is what lets the launcher keep
     // answering the window manager while it works, and notice the moment it ends.
-    enum class Job { None, Game, Fetch };
+    enum class Job { None, Game, Fetch, Build };
     std::atomic<int> jobKind{static_cast<int>(Job::None)};
     std::atomic<int> jobStatus{0};
     std::thread jobThread;
@@ -661,10 +696,18 @@ int main(int argc, char **argv)
     std::string jobDetail; // the last line the job printed
     float menuLit = 1.0f;  // ramps back up when a job finishes
 
-    auto startJob = [&](Job kind, int index, const std::string &command, bool captureOutput)
+    // The wizard's own state, written by the build thread and read by the menu
+    // thread: which step it is on, and the process it can stop.
+    std::atomic<int> buildStep{-1};
+    std::atomic<int> buildPid{0};
+    std::atomic<bool> buildStop{false};
+    std::atomic<bool> buildOk{false};
+    double buildStarted = 0.0;
+
+    auto beginJob = [&](Job kind, int index) -> bool
     {
         if (jobKind.load() != static_cast<int>(Job::None))
-            return;
+            return false;
         if (jobThread.joinable())
             jobThread.join();
         jobGame = index;
@@ -675,11 +718,64 @@ int main(int argc, char **argv)
             jobDetail.clear();
         }
         jobKind = static_cast<int>(kind);
-        SetTargetFPS(kind == Job::Game ? 10 : 20); // neither needs a full frame rate
+        SetTargetFPS(kind == Job::Game ? 10 : 20); // none of them needs a full frame rate
+        return true;
+    };
+
+    auto startJob = [&](Job kind, int index, const std::string &command, bool captureOutput)
+    {
+        if (!beginJob(kind, index))
+            return;
         std::fprintf(stderr, "[launcher] %s\n", command.c_str());
         jobThread = std::thread([&, kind, command, captureOutput]
         {
             jobStatus = captureOutput ? runCaptured(command, jobMutex, jobDetail) : std::system(command.c_str());
+            jobKind = static_cast<int>(Job::None);
+        });
+    };
+
+    // A build is a sequence rather than one command, so the thread runs the sequence
+    // and the step it has reached is what the screen draws.
+    auto startBuild = [&](int index, const std::string &image)
+    {
+        if (!beginJob(Job::Build, index))
+            return;
+        buildStep = 0;
+        buildStop = false;
+        buildOk = false;
+        buildStarted = GetTime();
+        std::fprintf(stderr, "[launcher] building %s from %s\n", games[index].id.c_str(), image.c_str());
+        jobThread = std::thread([&, index, image]
+        {
+            const builder::Recipe recipe = builder::readRecipe(games[index].portDir);
+            if (!recipe.ok)
+            {
+                {
+                    std::lock_guard<std::mutex> lock(jobMutex);
+                    jobDetail = recipe.error;
+                }
+                jobStatus = -1;
+                jobKind = static_cast<int>(Job::None);
+                return;
+            }
+            builder::Callbacks callbacks;
+            callbacks.childPid = &buildPid;
+            callbacks.keepGoing = [&] { return !buildStop.load(); };
+            callbacks.onStep = [&](int step)
+            {
+                buildStep = step;
+                std::fprintf(stderr, "[build] %s\n", builder::stepName(step));
+            };
+            callbacks.onLine = [&](const std::string &line)
+            {
+                // Onto the console as well as the screen: a build that fails needs
+                // something to read afterwards, and the screen is gone by then.
+                std::fprintf(stderr, "[build]   %s\n", line.c_str());
+                std::lock_guard<std::mutex> lock(jobMutex);
+                jobDetail = line;
+            };
+            buildOk = builder::run(games[index].portDir, image, recipe, callbacks);
+            jobStatus = buildOk.load() ? 0 : -1;
             jobKind = static_cast<int>(Job::None);
         });
     };
@@ -694,7 +790,61 @@ int main(int argc, char **argv)
         const float fs = std::max(0.8f, std::min(2.5f, std::min(w / 1280.0f, h / 720.0f)));
         const auto px = [fs](float v) { return static_cast<int>(std::lround(v * fs)); };
         ClearBackground(kind == Job::Game ? BLACK : (Color){12, 13, 17, 255});
-        if (kind != Job::Fetch || jobGame < 0 || jobGame >= static_cast<int>(games.size()))
+        if (jobGame < 0 || jobGame >= static_cast<int>(games.size()))
+            return;
+
+        // Building. The list is the pipeline, and which line it is on is the honest
+        // answer to "how long is this going to be".
+        if (kind == Job::Build)
+        {
+            const int current = buildStep.load();
+            const float rowHeight = 32.0f * fs;
+            const std::vector<std::string> title = wrapText("Building " + games[jobGame].title, px(26), w * 0.8f);
+            float y = h * 0.5f - static_cast<float>(builder::StepCount) * rowHeight * 0.5f - 70.0f * fs;
+            drawCenteredLines(title, w * 0.5f, y, px(26), (Color){236, 240, 248, 255}, 34.0f * fs);
+            y += static_cast<float>(title.size()) * 34.0f * fs + 26.0f * fs;
+
+            const float left = w * 0.5f - 210.0f * fs;
+            for (int i = 0; i < static_cast<int>(builder::StepCount); ++i)
+            {
+                const bool done = i < current;
+                const bool running = i == current;
+                const Color colour = done      ? (Color){116, 170, 132, 255}
+                                     : running ? (Color){240, 200, 90, 255}
+                                               : (Color){92, 100, 118, 255};
+                const std::string text = std::string(done ? "[done] " : running ? "[>]    " : "[ ]    ") +
+                                         builder::stepName(i);
+                DrawText(text.c_str(), static_cast<int>(left), static_cast<int>(y), px(20), colour);
+                y += rowHeight;
+            }
+
+            y += 6.0f * fs;
+            if (current >= 0 && current < static_cast<int>(builder::StepCount))
+            {
+                drawCenteredLines(wrapText(builder::stepNote(current), px(16), w * 0.7f), w * 0.5f, y, px(16),
+                                  (Color){126, 134, 152, 255}, 22.0f * fs);
+                y += 52.0f * fs;
+            }
+            std::string detail;
+            {
+                std::lock_guard<std::mutex> lock(jobMutex);
+                detail = jobDetail;
+            }
+            if (!detail.empty())
+            {
+                const std::vector<std::string> lines = wrapText(detail, px(16), w * 0.8f);
+                drawCenteredLines({lines.back()}, w * 0.5f, y, px(16), (Color){150, 158, 176, 255}, 22.0f * fs);
+            }
+
+            const int seconds = static_cast<int>(GetTime() - buildStarted);
+            drawCenteredLines({std::to_string(seconds / 60) + " min " + std::to_string(seconds % 60) + " s"},
+                              w * 0.5f, h - 74.0f * fs, px(16), (Color){104, 112, 130, 255}, 22.0f * fs);
+            drawCenteredLines({"Esc stops it"}, w * 0.5f, h - 44.0f * fs, px(16), (Color){104, 112, 130, 255},
+                              22.0f * fs);
+            return;
+        }
+
+        if (kind != Job::Fetch)
             return;
 
         const std::vector<std::string> heading =
@@ -719,6 +869,13 @@ int main(int argc, char **argv)
         drawCenteredLines(note, w * 0.5f, y, px(16), (Color){104, 112, 130, 255}, 22.0f * fs);
     };
 
+    // The wizard's picker: which source is highlighted, and whether it is up at all.
+    std::vector<builder::Source> sources;
+    std::vector<Rectangle> sourceRects;
+    int sourcePick = 0;
+    bool wizardOpen = false;
+    Vector2 lastWizardMouse{};
+
     while (true)
     {
         // Away from the menu. Closing the window is ignored on purpose: the work is
@@ -726,6 +883,14 @@ int main(int argc, char **argv)
         // written.
         if (jobKind.load() != static_cast<int>(Job::None))
         {
+            // A build can be stopped. The step being run is killed, and the sequence
+            // ends at the next boundary - re-running it is cheap, because every step
+            // skips what is already done.
+            if (jobKind.load() == static_cast<int>(Job::Build) && IsKeyPressed(KEY_ESCAPE))
+            {
+                buildStop = true;
+                builder::stop(buildPid);
+            }
             BeginDrawing();
             drawAwayScreen(static_cast<Job>(jobKind.load()));
             EndDrawing();
@@ -746,6 +911,23 @@ int main(int argc, char **argv)
                     std::fprintf(stderr, "[launcher] %s exited with status %d\n", games[selected].id.c_str(), status);
                 if (!musicMuted)
                     startTheme(games[selected]);
+            }
+            else if (finished == Job::Build)
+            {
+                if (index >= 0 && index < static_cast<int>(games.size()))
+                {
+                    // What is on disk decided these paths, so redoing it is what turns
+                    // the card from "not built" into "ready". Only the derived ones are
+                    // dropped: an explicit exe=/data= belongs to the config.
+                    if (!games[index].exeConfigured)
+                        games[index].exe.clear();
+                    if (!games[index].dataConfigured)
+                        games[index].data.clear();
+                    derivePaths(games[index]);
+                    if (!buildOk.load())
+                        std::fprintf(stderr, "[launcher] the build for %s did not finish\n",
+                                     games[index].id.c_str());
+                }
             }
             else if (index >= 0 && index < static_cast<int>(games.size()))
             {
@@ -771,6 +953,94 @@ int main(int argc, char **argv)
             for (size_t i = 0; i < games.size(); ++i)
                 if (!checkedRevisions[i].empty())
                     games[i].portRemote = checkedRevisions[i];
+        }
+        if (wizardOpen)
+        {
+            const float w = static_cast<float>(GetScreenWidth());
+            const float h = static_cast<float>(GetScreenHeight());
+            const float fs = std::max(0.8f, std::min(2.5f, std::min(w / 1280.0f, h / 720.0f)));
+            const auto px = [fs](float v) { return static_cast<int>(std::lround(v * fs)); };
+
+            sourceRects.assign(sources.size(), (Rectangle){0, 0, 0, 0});
+            BeginDrawing();
+            ClearBackground((Color){12, 13, 17, 255});
+
+            const std::vector<std::string> heading = wrapText("Build " + games[selected].title, px(28), w * 0.8f);
+            float y = h * 0.5f - 180.0f * fs;
+            drawCenteredLines(heading, w * 0.5f, y, px(28), (Color){236, 240, 248, 255}, 36.0f * fs);
+            y += static_cast<float>(heading.size()) * 36.0f * fs + 20.0f * fs;
+
+            const float rowHeight = 42.0f * fs;
+            if (!builder::supported())
+            {
+                drawCenteredLines(wrapText(builder::unsupportedNote(), px(18), w * 0.68f), w * 0.5f, y, px(18),
+                                  (Color){170, 176, 192, 255}, 26.0f * fs);
+            }
+            else if (sources.empty())
+            {
+                drawCenteredLines(wrapText("No disc and no disc image found.", px(20), w * 0.7f), w * 0.5f, y, px(20),
+                                  (Color){236, 240, 248, 255}, 28.0f * fs);
+                y += 44.0f * fs;
+                drawCenteredLines(wrapText("Put your .iso in a discs/ folder beside the launcher, or insert the "
+                                           "disc, and press B again.", px(17), w * 0.7f),
+                                  w * 0.5f, y, px(17), (Color){126, 134, 152, 255}, 24.0f * fs);
+            }
+            else
+            {
+                drawCenteredLines({"Where is your disc?"}, w * 0.5f, y, px(18), (Color){126, 134, 152, 255},
+                                  24.0f * fs);
+                y += 38.0f * fs;
+                for (size_t i = 0; i < sources.size(); ++i)
+                {
+                    const bool picked = static_cast<int>(i) == sourcePick;
+                    const float rowWidth = w * 0.56f;
+                    const Rectangle row = {w * 0.5f - rowWidth * 0.5f, y - 8.0f * fs, rowWidth,
+                                           rowHeight - 8.0f * fs};
+                    sourceRects[i] = row;
+                    if (picked)
+                        DrawRectangleRounded(row, 0.35f, 4, (Color){40, 58, 92, 255});
+                    const float width = static_cast<float>(MeasureText(sources[i].label.c_str(), px(19)));
+                    DrawText(sources[i].label.c_str(), static_cast<int>(w * 0.5f - width * 0.5f), static_cast<int>(y),
+                             px(19), picked ? WHITE : (Color){176, 184, 200, 255});
+                    y += rowHeight;
+                }
+            }
+
+            const bool choosable = builder::supported() && !sources.empty();
+            drawCenteredLines({choosable ? "Up / Down to choose    -    Click or Cross to start    -    Esc to go back"
+                                         : "Esc to go back"},
+                              w * 0.5f, h - 46.0f * fs, px(17), (Color){120, 130, 150, 255}, 24.0f * fs);
+            EndDrawing();
+
+            if (IsKeyPressed(KEY_ESCAPE))
+                wizardOpen = false;
+            if (choosable)
+            {
+                const Vector2 mouse = GetMousePosition();
+                if (mouse.x != lastWizardMouse.x || mouse.y != lastWizardMouse.y)
+                {
+                    lastWizardMouse = mouse;
+                    for (size_t i = 0; i < sourceRects.size(); ++i)
+                        if (CheckCollisionPointRec(mouse, sourceRects[i]))
+                            sourcePick = static_cast<int>(i);
+                }
+                const int count = static_cast<int>(sources.size());
+                if (IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_LEFT))
+                    sourcePick = (sourcePick + count - 1) % count;
+                if (IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_RIGHT))
+                    sourcePick = (sourcePick + 1) % count;
+                bool choose = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE);
+                if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && sourcePick >= 0 &&
+                    sourcePick < static_cast<int>(sourceRects.size()) &&
+                    CheckCollisionPointRec(mouse, sourceRects[sourcePick]))
+                    choose = true;
+                if (choose)
+                {
+                    wizardOpen = false;
+                    startBuild(selected, sources[sourcePick].path);
+                }
+            }
+            continue;
         }
 
         const float width = static_cast<float>(GetScreenWidth());
@@ -813,6 +1083,20 @@ int main(int argc, char **argv)
             selected = (selected + 1) % static_cast<int>(games.size());
         if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
             activate = true;
+        if (IsKeyPressed(KEY_B) && games[selected].portConfigured && !games[selected].portLocal.empty() &&
+            builder::supported())
+        {
+            // A configured disc= skips the picker entirely. Otherwise look for one and
+            // say what to do when there is none, rather than opening an empty list.
+            if (!games[selected].disc.empty())
+                startBuild(selected, games[selected].disc);
+            else
+            {
+                sources = builder::findSources(base);
+                sourcePick = 0;
+                wizardOpen = true;
+            }
+        }
         if (IsKeyPressed(KEY_U) && games[selected].portConfigured)
             startJob(Job::Fetch, selected, fetchCommand(games[selected]), true);
         if (IsKeyPressed(KEY_F11) && screenshotPath.empty())

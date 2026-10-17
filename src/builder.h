@@ -1,0 +1,100 @@
+// The build wizard's engine: what turns a game's fetched source plus the player's
+// own disc into something the menu can launch.
+//
+// It runs the same steps build.sh runs, in the same order, against the same paths.
+// The script and the wizard are two front ends to one sequence, so a change to one
+// is a change to the other.
+//
+// The steps are invoked directly rather than through a shell, and the file work is
+// done with std::filesystem rather than cp/rm/mkdir. That is what makes it possible
+// to control the environment of a child process exactly (the VU1 pass needs four
+// variables) and to stop a running step cleanly.
+#pragma once
+
+#include <atomic>
+#include <functional>
+#include <string>
+#include <vector>
+
+namespace builder
+{
+    // -------------------------------------------------------------- the source
+
+    // One place the game can be read from.
+    struct Source
+    {
+        std::string path;    // what the build reads
+        std::string label;   // what the picker shows
+        bool folder = false; // already extracted, so nothing to pull off a disc
+    };
+
+    // Optical drives first, then .iso/.bin files: a discs/ folder beside the config,
+    // then the config's own folder.
+    std::vector<Source> findSources(const std::string &configDir);
+
+    // -------------------------------------------------------------- the recipe
+
+    // What the port's own manifest (games/<id>/game.toml) says about building it.
+    // Read rather than assumed, so a second game needs no code.
+    struct Recipe
+    {
+        bool ok = false;
+        std::string error;
+        std::string bootFile;    // the ELF on the disc, and its hash
+        std::string bootHash;
+        std::string config;      // recompiler config
+        std::string functionMap;
+        int learnPasses = 2;
+        std::string learnPadScript;
+        std::string learnFrames;
+    };
+
+    Recipe readRecipe(const std::string &portDir);
+
+    // --------------------------------------------------------------- the steps
+
+    enum Step
+    {
+        StepTools,     // configure, and build the tools every later step calls
+        StepCheck,     // is this the right disc?
+        StepExtract,   // pull the files off it
+        StepRecompile, // the game's ELF, into C++
+        StepInstall,   // that C++ into the runtime
+        StepCompile,   // compile the port
+        StepVu1,       // learn the VU1 microprograms by running the game, twice
+        StepCount
+    };
+
+    const char *stepName(int step);
+    const char *stepNote(int step);
+
+    // Whether this platform can run a build at all. The port's Windows binary is
+    // cross-compiled from Linux and has never been built on Windows, so there is no
+    // Windows build to drive yet.
+    bool supported();
+    const char *unsupportedNote();
+
+    // Where a finished build leaves the runner, and the disc files it reads.
+    std::string builtRunner(const std::string &portDir);
+    std::string builtGameDir(const std::string &portDir);
+
+    // ------------------------------------------------------------- the running
+
+    // Called from the build thread. `keepGoing` is asked between steps; `childPid`
+    // carries the process that is running so the menu thread can stop it.
+    struct Callbacks
+    {
+        std::function<void(int)> onStep;                 // a step is starting
+        std::function<void(const std::string &)> onLine; // output, as it arrives
+        std::function<bool()> keepGoing;                 // false stops it
+        std::atomic<int> *childPid = nullptr;
+    };
+
+    // Runs every step in order. False means it did not finish: either it failed or
+    // it was stopped. The last line reported says which.
+    bool run(const std::string &portDir, const std::string &image, const Recipe &recipe, const Callbacks &cb);
+
+    // Stops whatever is running, taking its whole process tree: a compiler tree is
+    // not one process.
+    void stop(std::atomic<int> &childPid);
+}

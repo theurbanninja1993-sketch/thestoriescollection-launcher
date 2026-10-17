@@ -22,7 +22,10 @@ spending an evening on it rather than after.
 ## What it does today (phase 1)
 
 - The menu: two cards with **your own box art**, mouse hover and d-pad / stick
-  navigation, click or Cross to play, Esc to quit.
+  navigation, click or Cross to play, Esc to quit. **Every action has a controller
+  button as well as a key**, and the hints name whichever you are using: the bottom
+  face button plays, the left one fetches the source, the top one builds, and the
+  right one backs out or stops a build.
 - **Fullscreen by default** (F11 swaps), and the whole menu scales to the
   display, so it fills a 1440p monitor rather than sitting small in the middle.
 - Launches whatever is already built, per the paths in `launcher.ini`.

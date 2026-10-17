@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -336,17 +337,43 @@ namespace
         return revision.size() > 7 ? revision.substr(0, 7) : revision;
     }
 
+    // What the four face buttons are called on the pad that is connected. raylib
+    // reports positions rather than names, and the three families disagree about
+    // them: the bottom button is Cross on a PlayStation pad, A on an Xbox one, and B
+    // on a Switch one. Anything unrecognised is described the PlayStation way, which
+    // is what the rest of the launcher's wording assumes.
+    struct PadNames
+    {
+        std::string bottom, right, left, top;
+    };
+
+    PadNames padNames()
+    {
+        const char *raw = IsGamepadAvailable(0) ? GetGamepadName(0) : nullptr;
+        std::string name = raw != nullptr ? raw : "";
+        std::transform(name.begin(), name.end(), name.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (name.find("xbox") != std::string::npos || name.find("xinput") != std::string::npos ||
+            name.find("steam") != std::string::npos)
+            return {"A", "B", "X", "Y"};
+        if (name.find("switch") != std::string::npos || name.find("nintendo") != std::string::npos)
+            return {"B", "A", "Y", "X"}; // Nintendo numbers them the other way round
+        return {"Cross", "Circle", "Square", "Triangle"};
+    }
+
     // The one-line summary drawn under a card, or "" when there is nothing to say.
-    std::string portSummary(const Game &game)
+    // `fetch` and `build` are what to tell the player to press, which depends on
+    // whether they are holding a pad or sitting at a keyboard.
+    std::string portSummary(const Game &game, const std::string &fetch, const std::string &build)
     {
         if (!game.portConfigured)
             return {};
         if (game.portLocal.empty())
-            return "source not fetched - press U";
+            return "source not fetched - press " + fetch;
         if (!game.portRemote.empty() && game.portRemote != game.portLocal)
-            return "source update available - press U";
+            return "source update available - press " + fetch;
         if (!gameIsBuilt(game))
-            return "not built - press B";
+            return "not built - press " + build;
         return "ready";
     }
 
@@ -640,6 +667,11 @@ int main(int argc, char **argv)
     // often rather than every frame.
     float stickCooldown = 0.0f;
 
+    // Which device was touched last. Every hint the launcher shows is worded for it,
+    // so a controller player is never told to press a key. The port has done this
+    // for its own prompts since it was written; the launcher had not.
+    bool usingController = false;
+
     // What of each game's source is already here. Reading a revision is a local git
     // call, so it costs nothing to do now.
     for (Game &game : games)
@@ -851,8 +883,8 @@ int main(int argc, char **argv)
             const int seconds = static_cast<int>(GetTime() - buildStarted);
             drawCenteredLines({std::to_string(seconds / 60) + " min " + std::to_string(seconds % 60) + " s"},
                               w * 0.5f, h - 74.0f * fs, px(16), (Color){104, 112, 130, 255}, 22.0f * fs);
-            drawCenteredLines({"Esc stops it"}, w * 0.5f, h - 44.0f * fs, px(16), (Color){104, 112, 130, 255},
-                              22.0f * fs);
+            drawCenteredLines({usingController ? (padNames().right + " stops it") : "Esc stops it"}, w * 0.5f,
+                              h - 44.0f * fs, px(16), (Color){104, 112, 130, 255}, 22.0f * fs);
             return;
         }
 
@@ -888,8 +920,14 @@ int main(int argc, char **argv)
     bool wizardOpen = false;
     Vector2 lastWizardMouse{};
 
+    const int gamepad = 0; // the pad the launcher reads; it only ever uses one
+
     while (true)
     {
+        // Which names this pad's buttons go by, read once a frame so a controller
+        // plugged in or swapped mid-session is picked up.
+        const PadNames pad = padNames();
+
         // Away from the menu. Closing the window is ignored on purpose: the work is
         // still going, and quitting now would leave a game running or a clone half
         // written.
@@ -898,7 +936,10 @@ int main(int argc, char **argv)
             // A build can be stopped. The step being run is killed, and the sequence
             // ends at the next boundary - re-running it is cheap, because every step
             // skips what is already done.
-            if (jobKind.load() == static_cast<int>(Job::Build) && IsKeyPressed(KEY_ESCAPE))
+            const bool stopPressed =
+                IsKeyPressed(KEY_ESCAPE) ||
+                (IsGamepadAvailable(gamepad) && IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT));
+            if (jobKind.load() == static_cast<int>(Job::Build) && stopPressed)
             {
                 buildStop = true;
                 builder::stop(buildPid);
@@ -1019,12 +1060,18 @@ int main(int argc, char **argv)
             }
 
             const bool choosable = builder::supported() && !sources.empty();
-            drawCenteredLines({choosable ? "Up / Down to choose    -    Click or Cross to start    -    Esc to go back"
-                                         : "Esc to go back"},
+            const std::string startHint = usingController ? pad.bottom : "Cross";
+            const std::string backHint = usingController ? pad.right : "Esc";
+            drawCenteredLines({choosable ? ("Up / Down to choose    -    Click or " + startHint + " to start    -    " +
+                                            backHint + " to go back")
+                                         : (backHint + " to go back")},
                               w * 0.5f, h - 46.0f * fs, px(17), (Color){120, 130, 150, 255}, 24.0f * fs);
             EndDrawing();
 
-            if (IsKeyPressed(KEY_ESCAPE))
+            const bool backPressed =
+                IsKeyPressed(KEY_ESCAPE) ||
+                (IsGamepadAvailable(gamepad) && IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT));
+            if (backPressed)
                 wizardOpen = false;
             if (choosable)
             {
@@ -1041,7 +1088,9 @@ int main(int argc, char **argv)
                     sourcePick = (sourcePick + count - 1) % count;
                 if (IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_RIGHT))
                     sourcePick = (sourcePick + 1) % count;
-                bool choose = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE);
+                bool choose = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE) ||
+                              (IsGamepadAvailable(gamepad) &&
+                               IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_DOWN));
                 if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && sourcePick >= 0 &&
                     sourcePick < static_cast<int>(sourceRects.size()) &&
                     CheckCollisionPointRec(mouse, sourceRects[sourcePick]))
@@ -1095,12 +1144,41 @@ int main(int argc, char **argv)
             selected = (selected + 1) % static_cast<int>(games.size());
         if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
             activate = true;
-        if (IsKeyPressed(KEY_B) && games[selected].portConfigured && !games[selected].portLocal.empty() &&
-            builder::supported())
+        // Typing or clicking means the keyboard and mouse are the ones in use. This
+        // comes before the pad is read, so a frame with both favours the pad.
+        if (mouseMoved || IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsKeyPressed(KEY_LEFT) ||
+            IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_A) || IsKeyPressed(KEY_D) || IsKeyPressed(KEY_ENTER) ||
+            IsKeyPressed(KEY_SPACE) || IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_F11) || IsKeyPressed(KEY_M) ||
+            IsKeyPressed(KEY_U) || IsKeyPressed(KEY_B))
+            usingController = false;
+
+        // A controller gets the same three actions as the keyboard: the bottom face
+        // button plays, the left one fetches, the top one builds, and the right one
+        // backs out or stops a build. Square/X and Triangle/Y are the ones the pad in
+        // your hand calls them.
+        bool padFetch = false;
+        bool padBuild = false;
+        if (IsGamepadAvailable(gamepad))
         {
+            padFetch = IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_LEFT);
+            padBuild = IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_UP);
+            if (padFetch || padBuild || IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_DOWN) ||
+                IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT) ||
+                IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_MIDDLE_RIGHT) ||
+                IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_LEFT_FACE_LEFT) ||
+                IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_LEFT_FACE_RIGHT) ||
+                std::fabs(GetGamepadAxisMovement(gamepad, GAMEPAD_AXIS_LEFT_X)) > 0.5f)
+                usingController = true;
+        }
+        if (IsKeyPressed(KEY_B) || padBuild)
+        {
+            if (!games[selected].portConfigured || games[selected].portLocal.empty() || !builder::supported())
+            {
+                // Nothing to build from yet: the card already says so.
+            }
             // A configured disc= skips the picker entirely. Otherwise look for one and
             // say what to do when there is none, rather than opening an empty list.
-            if (!games[selected].disc.empty())
+            else if (!games[selected].disc.empty())
                 startBuild(selected, games[selected].disc);
             else
             {
@@ -1109,7 +1187,7 @@ int main(int argc, char **argv)
                 wizardOpen = true;
             }
         }
-        if (IsKeyPressed(KEY_U) && games[selected].portConfigured)
+        if ((IsKeyPressed(KEY_U) || padFetch) && games[selected].portConfigured)
             startJob(Job::Fetch, selected, fetchCommand(games[selected]), true);
         if (IsKeyPressed(KEY_F11) && screenshotPath.empty())
         {
@@ -1120,7 +1198,6 @@ int main(int argc, char **argv)
                 SetWindowSize(1280, 720);
         }
 
-        const int gamepad = 0;
         if (IsGamepadAvailable(gamepad))
         {
             if (IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_LEFT_FACE_LEFT))
@@ -1288,7 +1365,8 @@ int main(int argc, char **argv)
 
             // Where this game's source stands, when the launcher is the one fetching
             // it. It says what to press, so the footer does not have to.
-            const std::string portLine = portSummary(game);
+            const std::string portLine =
+                portSummary(game, usingController ? pad.left : "U", usingController ? pad.top : "B");
             if (!portLine.empty())
             {
                 const bool onThePlayer = game.portLocal.empty() ||
@@ -1329,7 +1407,8 @@ int main(int argc, char **argv)
 
         // Footer: how to drive it.
         std::string footer = "Left / Right or the stick to choose    -    ";
-        footer += games[selected].available ? "Click or Cross to play" : "this one is still being built";
+        footer += games[selected].available ? ("Click or " + (usingController ? pad.bottom : "Enter") + " to play")
+                                            : "this one is still being built";
         footer += "    -    F11: fullscreen";
         if (themesLoaded > 0)
             footer += musicMuted ? "    -    M: music off" : "    -    M: mute";

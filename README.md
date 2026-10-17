@@ -177,6 +177,26 @@ recompiled on your own machine from your own discs, and the box art and theme
 music it can use are yours to supply — see `art/README.txt` and
 `music/README.txt`.
 
+## Releasing it
+
+```sh
+tools/make_release.sh --linux --windows
+```
+
+Builds both launchers and writes a self-contained folder for each under `dist/`,
+with `START-HERE.txt` and `CHECKSUMS.txt`. Attach those to a GitHub release: a
+player downloads one small folder (2 MB and 3 MB) and needs no compiler to *run*
+the launcher. Building a game still wants a C++ toolchain and cmake — there is no
+way around that, because the game is made on their own machine.
+
+The version lives in `VERSION` and is compiled into the binary, so `--version`, the
+folder name and the release cannot disagree about which one it is.
+
+The Windows launcher is cross-compiled, and the script fetches llvm-mingw for it
+the same way the port's `build.sh` does. **On Windows the launcher fetches and
+plays, but does not build** — the wizard's build path is POSIX, because the Windows
+port is cross-compiled from Linux. Building there means WSL.
+
 ## Licence
 
 GPL-3.0 — the full text is in `LICENSE`. The same licence as the port it

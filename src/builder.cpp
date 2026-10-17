@@ -1,5 +1,7 @@
 #include "builder.h"
 
+#include "platform.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -323,21 +325,8 @@ namespace builder
         // Optical drives. Found here rather than by asking ps2x_iso, because the
         // tools are built by the first step of the build: the picker has to work
         // before anything exists.
-#if defined(_WIN32)
-        for (char letter = 'D'; letter <= 'Z'; ++letter)
-        {
-            const std::string root = std::string(1, letter) + ":\\";
-            if (GetDriveTypeA(root.c_str()) == DRIVE_CDROM)
-                sources.push_back({std::string(1, letter) + ":", std::string(1, letter) + ": (disc drive)", false});
-        }
-#else
-        for (int i = 0; i < 8; ++i)
-        {
-            const std::string drive = "/dev/sr" + std::to_string(i);
-            if (fs::exists(drive, ec))
-                sources.push_back({drive, drive + "  (disc drive)", false});
-        }
-#endif
+        for (const std::string &drive : platform::opticalDrives())
+            sources.push_back({drive, drive + "  (disc drive)", false});
 
         // Disc images, in the place a player would put them and beside the launcher.
         const std::vector<fs::path> where = {fs::path(configDir) / "discs", fs::path(configDir)};
@@ -560,7 +549,7 @@ namespace builder
         const std::string marker = join(buildDir, ".ps2x-build-interrupted");
         std::error_code probe;
         bool interrupted = fs::exists(marker, probe);
-        if (!interrupted && fs::exists(runner, probe) && access(runner.c_str(), X_OK) != 0)
+        if (!interrupted && fs::exists(runner, probe) && !platform::fileIsExecutable(runner))
             interrupted = true;
         if (interrupted)
         {

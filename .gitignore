@@ -16,3 +16,5 @@ music/*.qoa
 port/
 # this machine's own build paths; launcher.ini is the one that ships
 launcher.dev.ini
+build-release/
+dist/

@@ -11,6 +11,13 @@
 #include "raylib.h"
 
 #include "builder.h"
+#include "platform.h"
+
+// Set by CMakeLists from VERSION; this is only for an editor or a build that
+// forgot, so the string never silently goes missing.
+#ifndef PS2X_LAUNCHER_VERSION
+#define PS2X_LAUNCHER_VERSION "unknown"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -23,13 +30,9 @@
 #include <thread>
 #include <vector>
 
-#if defined(PS2X_LAUNCHER_WINDOWS)
-#include <windows.h>
-#else
-#include <sys/wait.h>
-#include <unistd.h>
-#include <limits.h>
-#endif
+// No <windows.h> here, deliberately: raylib declares Rectangle, CloseWindow and
+// ShowCursor, and Windows declares all three differently. The platform bits that
+// need it live in platform.cpp, which does not include raylib.
 
 namespace
 {
@@ -37,24 +40,6 @@ namespace
 
     // The folder the launcher is running from, so a portable layout works
     // wherever it is dropped: launcher.ini, art/ and games/ all resolve here.
-    std::string launcherDirectory()
-    {
-#if defined(PS2X_LAUNCHER_WINDOWS)
-        char buffer[MAX_PATH] = {};
-        if (GetModuleFileNameA(nullptr, buffer, MAX_PATH) == 0)
-            return ".";
-        std::string path = buffer;
-#else
-        char buffer[PATH_MAX] = {};
-        const ssize_t length = readlink("/proc/self/exe", buffer, sizeof buffer - 1);
-        if (length <= 0)
-            return ".";
-        std::string path(buffer, static_cast<size_t>(length));
-#endif
-        const size_t slash = path.find_last_of("/\\");
-        return slash == std::string::npos ? std::string(".") : path.substr(0, slash);
-    }
-
     bool isAbsolute(const std::string &path)
     {
         if (path.empty())
@@ -452,7 +437,7 @@ namespace
 
 int main(int argc, char **argv)
 {
-    const std::string directory = launcherDirectory();
+    const std::string directory = platform::executableDirectory();
     // launcher.ini normally sits beside the executable (that is the release
     // layout); falling back to the working directory keeps development simple,
     // where the binary lives in build/ but the config does not.
@@ -505,6 +490,11 @@ int main(int argc, char **argv)
             startSelection = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--launch") == 0 && i + 1 < argc)
             launchIndex = std::atoi(argv[++i]);
+        else if (std::strcmp(argv[i], "--version") == 0)
+        {
+            std::printf("ps2x-launcher %s\n", PS2X_LAUNCHER_VERSION);
+            return 0;
+        }
         else if (std::strcmp(argv[i], "--list") == 0)
         {
             for (size_t i = 0; i < games.size(); ++i)
@@ -1356,6 +1346,15 @@ int main(int argc, char **argv)
             const float hintWidth = static_cast<float>(MeasureText(hint, px(16)));
             DrawText(hint, static_cast<int>((width - hintWidth) * 0.5f), static_cast<int>(height - 22.0f * s), px(16),
                      (Color){84, 92, 110, 255});
+        }
+
+        // The version, quiet in the corner. It is the first thing anyone needs when
+        // they ask about the launcher, and the last thing that should be in the way.
+        {
+            const std::string version = std::string("v") + PS2X_LAUNCHER_VERSION;
+            const float versionWidth = static_cast<float>(MeasureText(version.c_str(), px(14)));
+            DrawText(version.c_str(), static_cast<int>(width - versionWidth - 20.0f * s),
+                     static_cast<int>(height - 22.0f * s), px(14), (Color){70, 78, 96, 255});
         }
 
         // Lights back up when a game has closed, rather than snapping to it.

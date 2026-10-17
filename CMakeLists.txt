@@ -22,7 +22,18 @@ FetchContent_MakeAvailable(raylib)
 
 # builder.cpp is the build wizard's engine: the steps that turn a fetched source
 # plus the player's disc into a game.
-add_executable(ps2x_launcher src/main.cpp src/builder.cpp src/builder.h)
+# platform.cpp holds the handful of things that differ per platform. It exists
+# because raylib and <windows.h> cannot share a translation unit, and the
+# compiler says so the moment anyone tries to build this for Windows.
+add_executable(ps2x_launcher src/main.cpp src/builder.cpp src/builder.h
+                              src/platform.cpp src/platform.h)
+
+# One version, in one file, so a release and the binary cannot disagree about which
+# one it is.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" PS2X_LAUNCHER_VERSION)
+string(STRIP "${PS2X_LAUNCHER_VERSION}" PS2X_LAUNCHER_VERSION)
+message(STATUS "ps2x-launcher version ${PS2X_LAUNCHER_VERSION}")
+target_compile_definitions(ps2x_launcher PRIVATE PS2X_LAUNCHER_VERSION="${PS2X_LAUNCHER_VERSION}")
 target_link_libraries(ps2x_launcher PRIVATE raylib)
 
 # The launcher is meant to sit in a folder next to the games it starts, so the

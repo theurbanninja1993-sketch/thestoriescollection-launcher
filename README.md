@@ -28,7 +28,7 @@ spending an evening on it rather than after.
   one backs out or stops a build — and on the menu it asks before quitting, because
   Circle sits under a thumb. The small button beside the d-pad toggles fullscreen,
   which is what Select is for on a pad: out of the way, and never pressed by
-  accident.
+  accident. Clicking the right stick in mutes the music, as `M` does.
 - **Fullscreen by default** (F11 swaps), and the whole menu scales to the
   display, so it fills a 1440p monitor rather than sitting small in the middle.
 - Launches whatever is already built, per the paths in `launcher.ini`.

@@ -346,6 +346,7 @@ namespace
     {
         std::string bottom, right, left, top;
         std::string select; // the small one beside the d-pad: Select, View, Minus
+        std::string mute;   // clicking the right stick in
     };
 
     PadNames padNamesFor(int slot)
@@ -356,10 +357,10 @@ namespace
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         if (name.find("xbox") != std::string::npos || name.find("xinput") != std::string::npos ||
             name.find("steam") != std::string::npos)
-            return {"A", "B", "X", "Y", "View"};
+            return {"A", "B", "X", "Y", "View", "R stick"};
         if (name.find("switch") != std::string::npos || name.find("nintendo") != std::string::npos)
-            return {"B", "A", "Y", "X", "Minus"}; // Nintendo numbers them the other way round
-        return {"Cross", "Circle", "Square", "Triangle", "Select"};
+            return {"B", "A", "Y", "X", "Minus", "R stick"}; // Nintendo numbers them the other way round
+        return {"Cross", "Circle", "Square", "Triangle", "Select", "R3"};
     }
 
     PadNames padNames() { return padNamesFor(0); }
@@ -1506,7 +1507,7 @@ int main(int argc, char **argv)
         }
 
         // ---------------------------------------------------------- music
-        if (IsKeyPressed(KEY_M) && themesLoaded > 0)
+        if ((IsKeyPressed(KEY_M) || padPressedAny(GAMEPAD_BUTTON_RIGHT_THUMB)) && themesLoaded > 0)
         {
             musicMuted = !musicMuted;
             if (!musicMuted)
@@ -1666,7 +1667,10 @@ int main(int argc, char **argv)
                                             : "this one is still being built";
         footer += "    -    " + std::string(usingController ? pad.select : "F11") + ": fullscreen";
         if (themesLoaded > 0)
-            footer += musicMuted ? "    -    M: music off" : "    -    M: mute";
+        {
+            const std::string muteKey = usingController ? pad.mute : "M";
+            footer += musicMuted ? ("    -    " + muteKey + ": music off") : ("    -    " + muteKey + ": mute");
+        }
         footer += "    -    " + std::string(usingController ? pad.right : "Esc") + ": quit";
         const float footerWidth = static_cast<float>(MeasureText(footer.c_str(), px(18)));
         DrawText(footer.c_str(), static_cast<int>((width - footerWidth) * 0.5f), static_cast<int>(height - 46.0f * s),

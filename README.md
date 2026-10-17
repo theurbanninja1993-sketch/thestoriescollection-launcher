@@ -77,6 +77,12 @@ whole download**. Sit on a card and press `U`. The card reports where its source
 stands — `source not fetched`, `source update available`, or the revision it
 already has — and an update is only ever taken when you ask for it.
 
+It follows the port's **`release` branch**, not `main`. That matters: `main` is
+where the game is being worked on and changes by the hour, while `release` only
+moves when a version is cut. So what you build is something that was tested, and
+the update prompt tells you when a new one exists — rather than handing you
+whatever the working branch happened to be that afternoon.
+
 Then press **B** and the wizard builds it, showing where it is as it goes:
 
 | Step | What it does | Roughly |

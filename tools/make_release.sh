@@ -117,6 +117,21 @@ EOF
     say "checksums"
     ( cd "$dest" && find . -type f ! -name CHECKSUMS.txt -print0 | sort -z | xargs -0 sha256sum > CHECKSUMS.txt )
     note "$dest"
+
+    # And an archive of it, because a release attaches files rather than folders.
+    # Both formats for both platforms: a tar.gz is what a Linux player expects and a
+    # zip is what a Windows one can open without being told how.
+    ( cd "$OUT" && tar -czf "$NAME-$platform.tar.gz" "$NAME-$platform" )
+    note "$OUT/$NAME-$platform.tar.gz"
+    if command -v zip >/dev/null 2>&1; then
+        ( cd "$OUT" && zip -qr "$NAME-$platform.zip" "$NAME-$platform" )
+        note "$OUT/$NAME-$platform.zip"
+    elif command -v 7z >/dev/null 2>&1; then
+        ( cd "$OUT" && 7z a -tzip -bso0 -bsp0 "$NAME-$platform.zip" "$NAME-$platform" >/dev/null )
+        note "$OUT/$NAME-$platform.zip"
+    else
+        note "neither zip nor 7z here, so no .zip for $platform"
+    fi
 }
 
 # ------------------------------------------------------------------- platforms

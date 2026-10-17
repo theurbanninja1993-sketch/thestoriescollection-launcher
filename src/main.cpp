@@ -735,6 +735,12 @@ int main(int argc, char **argv)
     std::vector<int> buildPlan;      // the steps it will take, in order
     int buildPlanAt = 0;             // which of them is running
 
+    // Whether a run also cross-compiles Windows. WSL is a Linux machine running on a
+    // Windows one, so there the Windows build is the one that is any use; anywhere
+    // else it is this machine's own, unless the config says otherwise either way.
+    auto willCrossCompile = [&]
+    { return settings.crossCompile < 0 ? builder::runningUnderWsl() : settings.crossCompile != 0; };
+
     auto beginJob = [&](Job kind, int index) -> bool
     {
         if (jobKind.load() != static_cast<int>(Job::None))
@@ -771,10 +777,7 @@ int main(int argc, char **argv)
     {
         if (!beginJob(Job::Build, index))
             return;
-        // WSL is a Linux machine running on a Windows one, so the build that is any
-        // use there is the Windows one. Everywhere else it is this machine's own,
-        // unless the config says otherwise either way.
-        buildCrosses = settings.crossCompile < 0 ? builder::runningUnderWsl() : settings.crossCompile != 0;
+        buildCrosses = willCrossCompile();
         buildPlan = builder::plan(buildCrosses);
         buildPlanAt = 0;
         buildStep = buildPlan.empty() ? -1 : buildPlan.front();
@@ -913,11 +916,17 @@ int main(int argc, char **argv)
         drawCenteredLines(note, w * 0.5f, y, px(16), (Color){104, 112, 130, 255}, 22.0f * fs);
     };
 
-    // The wizard's picker: which source is highlighted, and whether it is up at all.
+    // The wizard: choosing where the game is read from, then confirming it. The
+    // confirmation is not ceremony - a build is twenty to forty minutes, and one
+    // press on a controller should not be able to start it.
+    enum class Wizard { None, Pick, Confirm };
+    Wizard wizard = Wizard::None;
     std::vector<builder::Source> sources;
     std::vector<Rectangle> sourceRects;
     int sourcePick = 0;
-    bool wizardOpen = false;
+    std::string wizardImage;       // what the build would read
+    std::string wizardLabel;       // what to call it on the confirmation
+    bool wizardFromPicker = false; // so backing out returns to the list
     Vector2 lastWizardMouse{};
 
     const int gamepad = 0; // the pad the launcher reads; it only ever uses one
@@ -1007,7 +1016,7 @@ int main(int argc, char **argv)
                 if (!checkedRevisions[i].empty())
                     games[i].portRemote = checkedRevisions[i];
         }
-        if (wizardOpen)
+        if (wizard == Wizard::Pick)
         {
             const float w = static_cast<float>(GetScreenWidth());
             const float h = static_cast<float>(GetScreenHeight());
@@ -1067,12 +1076,18 @@ int main(int argc, char **argv)
                                          : (backHint + " to go back")},
                               w * 0.5f, h - 46.0f * fs, px(17), (Color){120, 130, 150, 255}, 24.0f * fs);
             EndDrawing();
+            if (!screenshotPath.empty())
+            {
+                TakeScreenshot(screenshotPath.c_str());
+                std::fprintf(stderr, "[launcher] wrote %s\n", screenshotPath.c_str());
+                break;
+            }
 
             const bool backPressed =
                 IsKeyPressed(KEY_ESCAPE) ||
                 (IsGamepadAvailable(gamepad) && IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT));
             if (backPressed)
-                wizardOpen = false;
+                wizard = Wizard::None;
             if (choosable)
             {
                 const Vector2 mouse = GetMousePosition();
@@ -1097,9 +1112,110 @@ int main(int argc, char **argv)
                     choose = true;
                 if (choose)
                 {
-                    wizardOpen = false;
-                    startBuild(selected, sources[sourcePick].path);
+                    wizardImage = sources[sourcePick].path;
+                    wizardLabel = sources[sourcePick].label;
+                    wizardFromPicker = true;
+                    wizard = Wizard::Confirm;
                 }
+            }
+            continue;
+        }
+        if (wizard == Wizard::Confirm)
+        {
+            const float w = static_cast<float>(GetScreenWidth());
+            const float h = static_cast<float>(GetScreenHeight());
+            const float fs = std::max(0.8f, std::min(2.5f, std::min(w / 1280.0f, h / 720.0f)));
+            const auto px = [fs](float v) { return static_cast<int>(std::lround(v * fs)); };
+
+            BeginDrawing();
+            ClearBackground((Color){12, 13, 17, 255});
+
+            const std::vector<std::string> heading =
+                wrapText("Build " + games[selected].title + "?", px(28), w * 0.8f);
+            float y = h * 0.5f - 190.0f * fs;
+            drawCenteredLines(heading, w * 0.5f, y, px(28), (Color){236, 240, 248, 255}, 36.0f * fs);
+            y += static_cast<float>(heading.size()) * 36.0f * fs + 30.0f * fs;
+
+            const bool cross = willCrossCompile();
+            const int minutes = builder::planMinutes(cross, wizardImage);
+            struct Row
+            {
+                const char *label;
+                std::string value;
+            };
+            const std::vector<Row> rows = {
+                {"from", wizardLabel},
+                {"for", cross ? "this machine, and for Windows" : "this machine"},
+                // Rounded to five, because the estimate is not good to the minute.
+                {"takes", "about " + std::to_string((minutes / 5) * 5) + " minutes"},
+            };
+
+            const float left = w * 0.5f - 260.0f * fs;
+            for (const Row &row : rows)
+            {
+                DrawText(row.label, static_cast<int>(left), static_cast<int>(y), px(17),
+                         (Color){126, 134, 152, 255});
+                const std::vector<std::string> valueLines = wrapText(row.value, px(17), w * 0.52f);
+                float rowY = y;
+                for (const std::string &line : valueLines)
+                {
+                    DrawText(line.c_str(), static_cast<int>(left + 70.0f * fs), static_cast<int>(rowY), px(17),
+                             (Color){196, 203, 216, 255});
+                    rowY += 26.0f * fs;
+                }
+                y = rowY + 8.0f * fs;
+            }
+
+            y += 20.0f * fs;
+            drawCenteredLines(wrapText("Nothing of the game is fetched: it is read from your disc, and built here.",
+                                       px(16), w * 0.7f),
+                              w * 0.5f, y, px(16), (Color){104, 112, 130, 255}, 22.0f * fs);
+
+            // Two buttons, and only they start anything. Clicking the window at large
+            // used to be enough, which is one stray click away from half an hour of
+            // compiling - the exact mistake this screen exists to prevent.
+            const Vector2 mouse = GetMousePosition();
+            const float buttonW = 168.0f * fs, buttonH = 46.0f * fs, buttonGap = 34.0f * fs;
+            const Rectangle startButton = {w * 0.5f - buttonW - buttonGap * 0.5f, h - 168.0f * fs, buttonW, buttonH};
+            const Rectangle backButton = {w * 0.5f + buttonGap * 0.5f, startButton.y, buttonW, buttonH};
+            const auto drawButton = [&](const Rectangle &rect, const char *text)
+            {
+                const bool over = CheckCollisionPointRec(mouse, rect);
+                DrawRectangleRounded(rect, 0.3f, 4, over ? (Color){62, 92, 150, 255} : (Color){32, 38, 52, 255});
+                const float textWidth = static_cast<float>(MeasureText(text, px(20)));
+                DrawText(text, static_cast<int>(rect.x + (rect.width - textWidth) * 0.5f),
+                         static_cast<int>(rect.y + (rect.height - static_cast<float>(px(20))) * 0.5f), px(20),
+                         over ? WHITE : (Color){186, 194, 210, 255});
+            };
+            drawButton(startButton, "Start");
+            drawButton(backButton, "Not now");
+
+            const std::string footer = (usingController ? pad.bottom : "Cross") + std::string(" to start    -    ") +
+                                       (usingController ? pad.right : "Esc") + " to go back";
+            drawCenteredLines({footer}, w * 0.5f, h - 46.0f * fs, px(17), (Color){120, 130, 150, 255}, 24.0f * fs);
+            EndDrawing();
+
+            if (!screenshotPath.empty())
+            {
+                TakeScreenshot(screenshotPath.c_str());
+                std::fprintf(stderr, "[launcher] wrote %s\n", screenshotPath.c_str());
+                break;
+            }
+
+            const bool start =
+                IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE) ||
+                (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, startButton)) ||
+                (IsGamepadAvailable(gamepad) && IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_DOWN));
+            const bool back =
+                IsKeyPressed(KEY_ESCAPE) ||
+                (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, backButton)) ||
+                (IsGamepadAvailable(gamepad) && IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT));
+            if (back)
+                wizard = wizardFromPicker ? Wizard::Pick : Wizard::None;
+            else if (start)
+            {
+                wizard = Wizard::None;
+                startBuild(selected, wizardImage);
             }
             continue;
         }
@@ -1179,12 +1295,17 @@ int main(int argc, char **argv)
             // A configured disc= skips the picker entirely. Otherwise look for one and
             // say what to do when there is none, rather than opening an empty list.
             else if (!games[selected].disc.empty())
-                startBuild(selected, games[selected].disc);
+            {
+                wizardImage = games[selected].disc;
+                wizardLabel = games[selected].disc;
+                wizardFromPicker = false;
+                wizard = Wizard::Confirm;
+            }
             else
             {
                 sources = builder::findSources(base);
                 sourcePick = 0;
-                wizardOpen = true;
+                wizard = Wizard::Pick;
             }
         }
         if ((IsKeyPressed(KEY_U) || padFetch) && games[selected].portConfigured)

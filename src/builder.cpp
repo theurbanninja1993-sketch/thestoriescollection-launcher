@@ -467,6 +467,24 @@ namespace builder
         }
     }
 
+    int planMinutes(bool windows, const std::string &image)
+    {
+        std::error_code ec;
+        // Measured on the machine this was written on: the tools 161 s, the port's
+        // own compile 426 s, and the two VU1 passes about 800 s.
+        const bool folder = fs::is_directory(image, ec);
+        int minutes = 3;             // configuring and building the tools
+        if (windows)
+            minutes += 3;            // llvm-mingw, first time only
+        if (!folder)
+            minutes += 17;           // reading a disc, which is the slow part
+        minutes += 7;                // compiling the port
+        minutes += 14;               // learning and compiling the microprograms
+        if (windows)
+            minutes += 15;           // the cross-compile and its copy of the game
+        return minutes;
+    }
+
     std::vector<int> plan(bool windows)
     {
         std::vector<int> steps = {StepTools};

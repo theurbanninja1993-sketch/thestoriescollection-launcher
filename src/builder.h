@@ -85,6 +85,11 @@ namespace builder
     // True under WSL, where the point of building anything is the Windows binary.
     bool runningUnderWsl();
 
+    // How long the steps take, roughly, so a player can decide before committing to
+    // them. Honest about the order of magnitude rather than precise: it is the
+    // difference between "a moment" and "go and make tea".
+    int planMinutes(bool windows, const std::string &image);
+
     // Where a cross-build leaves something that can be copied to a Windows machine:
     // the exe, its DLLs and the game's files, all in one folder.
     std::string windowsOutDir(const std::string &portDir);

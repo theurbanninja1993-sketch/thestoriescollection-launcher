@@ -131,6 +131,30 @@ namespace platform
 #endif
     }
 
+    std::string changeDirectoryCommand(const std::string &path)
+    {
+        if (path.empty())
+            return {};
+#if defined(_WIN32)
+        // /d so a different drive is allowed.
+        return "cd /d \"" + path + "\"";
+#else
+        return "cd \"" + path + "\"";
+#endif
+    }
+
+    std::string captureEverything(const std::string &command)
+    {
+        if (command.empty())
+            return command;
+#if defined(_WIN32)
+        // cmd has no braces; a parenthesised group is the equivalent.
+        return "(" + command + ") 2>&1";
+#else
+        return "{ " + command + " ; } 2>&1";
+#endif
+    }
+
     void becomeDpiAware()
     {
 #if defined(_WIN32)

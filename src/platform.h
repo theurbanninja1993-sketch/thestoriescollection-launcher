@@ -40,6 +40,18 @@ namespace platform
     // do this regardless" to both.
     const char *commandSeparator();
 
+    // A command that puts the shell in a directory, so everything after it can use
+    // plain relative names. Worth having: a Windows path in a tar command is
+    // `C:/...`, and the `C:` is read as a remote host by the MSYS tar that a Git
+    // install puts on the PATH.
+    std::string changeDirectoryCommand(const std::string &path);
+
+    // Wraps a whole command so that everything it prints - including what the shell
+    // itself says when a program cannot be found - is captured. Without it, `popen`
+    // takes stdout only and the reason a step failed goes to a console that a GUI
+    // player does not have.
+    std::string captureEverything(const std::string &command);
+
     // Whether a tool can be run, so a failure can name what is missing instead of
     // showing a player a raw shell error.
     bool commandExists(const std::string &command);

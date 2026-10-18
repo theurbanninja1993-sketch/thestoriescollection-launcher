@@ -492,6 +492,17 @@ namespace
     // The revision is written next to the source rather than inside it, because
     // the source is wiped and replaced every time: it is the ref's commit, asked
     // of the API, so the card can say whether the download is the newest one.
+    // Fetching is a download, not a clone: curl and tar ship with Windows 10 and
+    // with every desktop Linux, and neither needs installing, an account, or git.
+    //
+    // Everything runs from the port's *parent* folder with relative names, which
+    // is not tidiness: a Windows path passed to tar is `C:/...`, and the `C:` is
+    // read as a remote host by the MSYS tar that a Git for Windows install puts on
+    // the PATH, so the unpack fails on a path that looks perfectly ordinary.
+    //
+    // The revision is written beside the source rather than inside it, because the
+    // source is replaced wholesale on every fetch: it is the ref's commit, asked
+    // of the API, so the card can say whether the download is the newest one.
     std::string fetchCommand(const Game &game)
     {
         const std::string repository = repositoryPath(game.portUrl);
@@ -500,29 +511,28 @@ namespace
         const std::string ref = portRefOf(game);
         const std::string archive = "https://github.com/" + repository + "/archive/" + ref + ".tar.gz";
         const std::string revision = "https://api.github.com/repos/" + repository + "/commits/" + ref;
-        const std::string tarball = game.portDir + ".tar.gz";
+
+        const std::string parent = std::filesystem::path(game.portDir).parent_path().string();
+        const std::string folder = std::filesystem::path(game.portDir).filename().string();
+        const std::string tarball = folder + ".tar.gz";
         const std::string revisionFile = revisionPath(game);
 
-        // The two housekeeping steps are unconditional and joined with the
-        // platform's own separator: they have nothing to say when the folder is not
-        // there yet, and a chain that stops on them would stop before it started.
-        // Everything that can actually go wrong is after them, on `&&`, and each
-        // step says what it is doing first, so a failure says where it happened.
         const std::string join = platform::commandSeparator();
         std::string command;
         command += "echo fetching " + repository + " " + ref + " && ";
+        command += platform::changeDirectoryCommand(parent) + join;
         if (safeToWipe(game.portDir))
             command += platform::removeTreeCommand(game.portDir) + join;
         command += platform::makeDirectoryCommand(game.portDir) + join;
         command += "echo downloading, about 5 MB && ";
-        command += "curl -fL --retry 3 -o \"" + tarball + "\" \"" + archive + "\" 2>&1 && ";
+        command += "curl -fL --retry 3 -o \"" + tarball + "\" \"" + archive + "\" && ";
         command += "echo unpacking && ";
-        command += "tar -xzf \"" + tarball + "\" -C \"" + game.portDir + "\" --strip-components=1 2>&1 && ";
+        command += "tar -xzf \"" + tarball + "\" -C \"" + folder + "\" --strip-components=1 && ";
         command += "rm -f \"" + tarball + "\" && ";
         command += "echo asking GitHub which revision that was && ";
-        command += "curl -sL -o \"" + revisionFile + "\" \"" + revision + "\" 2>&1 && ";
+        command += "curl -sL -o \"" + revisionFile + "\" \"" + revision + "\" && ";
         command += "echo done";
-        return command;
+        return platform::captureEverything(command);
     }
 
     // What the remote has for the ref, without touching the working tree.
@@ -1122,9 +1132,41 @@ int main(int argc, char **argv)
         if (!beginJob(kind, index))
             return;
         std::fprintf(stderr, "[launcher] %s\n", command.c_str());
-        jobThread = std::thread([&, kind, command, captureOutput]
+        jobThread = std::thread([&, kind, index, command, captureOutput]
         {
-            jobStatus = captureOutput ? runCaptured(command, jobMutex, jobDetail) : std::system(command.c_str());
+            if (kind != Job::Fetch)
+            {
+                jobStatus = captureOutput ? runCaptured(command, jobMutex, jobDetail) : std::system(command.c_str());
+                jobKind = static_cast<int>(Job::None);
+                return;
+            }
+            // A fetch keeps every line it printed, because a failure is usually the
+            // one line a step said - and the screen is gone by the time it is read.
+            std::vector<std::string> lines;
+            jobStatus = runCapturedAll(command, lines);
+            std::string tail;
+            for (const std::string &line : lines)
+            {
+                tail += line;
+                tail += "\n";
+            }
+            const std::string logPath = base + "/logs/" + games[index].id + "-fetch.log";
+            std::error_code logEc;
+            std::filesystem::create_directories(std::filesystem::path(logPath).parent_path(), logEc);
+            {
+                std::ofstream out(logPath, std::ios::binary | std::ios::trunc);
+                if (out)
+                    out << tail;
+            }
+            {
+                std::lock_guard<std::mutex> lock(jobMutex);
+                jobDetail = lines.empty() ? std::string{} : lines.back();
+                for (auto it = lines.rbegin(); it != lines.rend() && jobDetail.size() < 40; ++it)
+                {
+                    if (it != lines.rbegin())
+                        jobDetail = *it + " / " + jobDetail;
+                }
+            }
             jobKind = static_cast<int>(Job::None);
         });
     };
@@ -1509,6 +1551,7 @@ int main(int argc, char **argv)
                     }
                     if (fetchReportDetail.empty())
                         fetchReportDetail = "nothing was reported.";
+                      fetchReportDetail += "   (the whole thing is in logs/" + games[index].id + "-fetch.log)";
                       if (!platform::commandExists("curl"))
                           fetchReportDetail += "   (curl was not found, and the launcher downloads a game's source "
                                                "with it. It ships with Windows 10 and with every desktop Linux.)";

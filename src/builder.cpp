@@ -755,8 +755,9 @@ namespace builder
         if (hash != recipe.bootHash)
         {
             if (cb.onLine)
-                cb.onLine("this disc is not the one this source is for: its boot file hashes to " + hash +
-                          ", and this source expects " + recipe.bootHash);
+                cb.onLine("this is a PlayStation 2 disc, but not the one this source was built for: its boot file (" +
+                          recipe.bootFile + ") hashes to " + hash + ", and this source expects " + recipe.bootHash +
+                          ". A different region, a different pressing, or an image a tool has edited will do this.");
             return false;
         }
 

@@ -19,3 +19,6 @@ launcher.dev.ini
 build-release/
 dist/
 build-win/
+# the cross-toolchain make_release.sh fetches for the Windows build, as the port's
+# build.sh does: 88 MB to download, and not ours to track
+toolchains/

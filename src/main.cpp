@@ -111,6 +111,11 @@ namespace
         bool fullscreen = true;   // a front end is meant to sit on the screen
         int crossCompile = -1;    // -1 unset: under WSL that means yes, elsewhere no
         std::string toolchain;    // a specific llvm-mingw to cross-compile with
+        // Where to ask about a newer launcher. The launcher cannot update itself,
+        // so this is only ever a version to compare against and a page to open -
+        // and it is a setting rather than a constant, so a fork checks its own
+        // releases.
+        std::string updateRepo = "https://github.com/theurbanninja1993-sketch/thestoriescollection-launcher.git";
     };
 
     // A deliberately small key=value reader: one "[game:<id>]" section per game,
@@ -163,6 +168,8 @@ namespace
                     settings.crossCompile = std::atoi(value.c_str()) != 0 ? 1 : 0;
                 else if (key == "toolchain")
                     settings.toolchain = value;
+                else if (key == "update_repo")
+                    settings.updateRepo = value;
                 continue;
             }
             if (current == nullptr)
@@ -274,6 +281,101 @@ namespace
 #endif
     }
 
+    // Runs a command and keeps every line it printed. runCaptured keeps only the
+    // last, which is what a progress screen wants; a tag listing needs them all.
+    int runCapturedAll(const std::string &command, std::vector<std::string> &lines)
+    {
+        lines.clear();
+#if defined(PS2X_LAUNCHER_WINDOWS)
+        FILE *pipe = _popen(command.c_str(), "r");
+#else
+        FILE *pipe = popen(command.c_str(), "r");
+#endif
+        if (pipe == nullptr)
+            return -1;
+        char line[512];
+        while (std::fgets(line, sizeof line, pipe) != nullptr)
+        {
+            const std::string text = trim(line);
+            if (!text.empty())
+                lines.push_back(text);
+        }
+#if defined(PS2X_LAUNCHER_WINDOWS)
+        return _pclose(pipe);
+#else
+        const int status = pclose(pipe);
+        return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+#endif
+    }
+
+    // A version as numbers, so 0.1.10 is newer than 0.1.9 - which comparing the
+    // strings gets wrong, and which will matter the first time there is a tenth.
+    std::vector<int> versionNumbers(const std::string &text)
+    {
+        std::vector<int> numbers;
+        size_t at = text.find_first_of("0123456789");
+        while (at != std::string::npos)
+        {
+            const size_t end = text.find_first_not_of("0123456789", at);
+            numbers.push_back(std::atoi(text.substr(at, end - at).c_str()));
+            at = end == std::string::npos ? std::string::npos : text.find_first_of("0123456789", end);
+        }
+        return numbers;
+    }
+
+    bool versionIsNewer(const std::string &candidate, const std::string &current)
+    {
+        const std::vector<int> a = versionNumbers(candidate), b = versionNumbers(current);
+        for (size_t i = 0; i < std::max(a.size(), b.size()); ++i)
+        {
+            const int left = i < a.size() ? a[i] : 0;
+            const int right = i < b.size() ? b[i] : 0;
+            if (left != right)
+                return left > right;
+        }
+        return false;
+    }
+
+    // The highest "v<number>" tag a repository has, or "" if it has none. An
+    // annotated tag appears twice, once as the tag and once peeled; the peeled
+    // line is skipped because it is the same release.
+    std::string highestVersionTag(const std::vector<std::string> &lines)
+    {
+        std::string best;
+        for (const std::string &line : lines)
+        {
+            const size_t at = line.find("refs/tags/");
+            if (at == std::string::npos)
+                continue;
+            std::string name = line.substr(at + 10);
+            if (name.size() >= 3 && name.compare(name.size() - 3, 3, "^{}") == 0)
+                continue;
+            if (name.size() < 2 || name[0] != 'v' || !std::isdigit(static_cast<unsigned char>(name[1])))
+                continue;
+            name.erase(0, 1);
+            if (best.empty() || versionIsNewer(name, best))
+                best = name;
+        }
+        return best;
+    }
+
+    // What the launcher's own repository has released. Asked over git rather than
+    // the GitHub API: git is already required to fetch a game's source, so this
+    // needs nothing new, and it is one round trip rather than a rate-limited API.
+    std::string launcherUpdateCommand(const Settings &settings)
+    {
+        return "git ls-remote --tags \"" + settings.updateRepo + "\" 2>&1";
+    }
+
+    // The page to send someone to when there is a newer release.
+    std::string releasePageUrl(const std::string &repository)
+    {
+        std::string url = repository;
+        if (url.size() > 4 && url.compare(url.size() - 4, 4, ".git") == 0)
+            url.resize(url.size() - 4);
+        return url + "/releases/latest";
+    }
+
     // The revision of a fetched tree, or "" when there is not one to read.
     std::string readRevision(const std::string &directory)
     {
@@ -372,6 +474,7 @@ namespace
         std::string bottom, right, left, top;
         std::string select; // the small one beside the d-pad: Select, View, Minus
         std::string mute;   // clicking the right stick in
+        std::string bumper; // the upper shoulder button: L1, LB, L
     };
 
     PadNames padNamesFor(int slot)
@@ -382,10 +485,10 @@ namespace
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         if (name.find("xbox") != std::string::npos || name.find("xinput") != std::string::npos ||
             name.find("steam") != std::string::npos)
-            return {"A", "B", "X", "Y", "View", "R stick"};
+            return {"A", "B", "X", "Y", "View", "R stick", "LB"};
         if (name.find("switch") != std::string::npos || name.find("nintendo") != std::string::npos)
-            return {"B", "A", "Y", "X", "Minus", "R stick"}; // Nintendo numbers them the other way round
-        return {"Cross", "Circle", "Square", "Triangle", "Select", "R3"};
+            return {"B", "A", "Y", "X", "Minus", "R stick", "L"}; // Nintendo numbers them the other way round
+        return {"Cross", "Circle", "Square", "Triangle", "Select", "R3", "L1"};
     }
 
     PadNames padNames() { return padNamesFor(0); }
@@ -559,6 +662,27 @@ int main(int argc, char **argv)
             for (size_t i = 0; i < games.size(); ++i)
                 std::printf("%zu\t%s\t%s\n", i, games[i].id.c_str(),
                             games[i].available ? "available" : "coming soon");
+            return 0;
+        }
+        else if (std::strcmp(argv[i], "--check-updates") == 0)
+        {
+            // The button, without the window - so a script can ask, and so the
+            // answer can be read somewhere other than a screenshot.
+            std::vector<std::string> lines;
+            const int status = runCapturedAll(launcherUpdateCommand(settings), lines);
+            const std::string newest = status == 0 ? highestVersionTag(lines) : std::string{};
+            if (newest.empty())
+            {
+                std::printf("ps2x-launcher %s - could not ask %s\n", PS2X_LAUNCHER_VERSION,
+                            settings.updateRepo.c_str());
+                return 1;
+            }
+            if (versionIsNewer(newest, PS2X_LAUNCHER_VERSION))
+                std::printf("ps2x-launcher %s - %s is available: %s\n", PS2X_LAUNCHER_VERSION, newest.c_str(),
+                            releasePageUrl(settings.updateRepo).c_str());
+            else
+                std::printf("ps2x-launcher %s - up to date (the newest release is %s)\n", PS2X_LAUNCHER_VERSION,
+                            newest.c_str());
             return 0;
         }
     }
@@ -775,6 +899,43 @@ int main(int argc, char **argv)
         });
     };
     startUpdateChecks();
+
+    // The launcher's own version, asked the same way and in the background. It
+    // cannot update itself, so this is a button and a version to compare against -
+    // but a player who never presses it would never learn, so it is asked once at
+    // launch as well, and the button is for asking again.
+    enum class LauncherCheck { Never, Running, UpToDate, Available, Failed };
+    std::atomic<int> launcherCheck{static_cast<int>(LauncherCheck::Never)};
+    std::mutex launcherVersionMutex;
+    std::string launcherVersion; // the newest release the repository has
+    std::thread launcherCheckThread;
+    auto startLauncherCheck = [&]
+    {
+        if (launcherCheck.load() == static_cast<int>(LauncherCheck::Running))
+            return;
+        if (launcherCheckThread.joinable())
+            launcherCheckThread.join();
+        launcherCheck = static_cast<int>(LauncherCheck::Running);
+        launcherCheckThread = std::thread([&]
+        {
+            std::vector<std::string> lines;
+            const int status = runCapturedAll(launcherUpdateCommand(settings), lines);
+            const std::string newest = status == 0 ? highestVersionTag(lines) : std::string{};
+            {
+                std::lock_guard<std::mutex> lock(launcherVersionMutex);
+                launcherVersion = newest;
+            }
+            // No answer at all is not the same as "up to date": offline, or no git,
+            // would otherwise be reported as being current, which is a lie a player
+            // would act on.
+            launcherCheck = static_cast<int>(newest.empty()
+                                                 ? LauncherCheck::Failed
+                                                 : (versionIsNewer(newest, PS2X_LAUNCHER_VERSION)
+                                                        ? LauncherCheck::Available
+                                                        : LauncherCheck::UpToDate));
+        });
+    };
+    startLauncherCheck();
 
     // One background job at a time: the game, or fetching a port's source. Waiting
     // in a thread rather than blocking the loop is what lets the launcher keep
@@ -1123,6 +1284,18 @@ int main(int argc, char **argv)
             return 1;
         return -1;
     };
+
+    // A screenshot is taken of one frame, and a background check that has not
+    // answered yet would be caught mid-sentence - "checking..." instead of the
+    // answer. So screenshot mode waits for them: it is the mode used to look at
+    // the layout, and the layout is what the answer changes.
+    if (!screenshotPath.empty())
+    {
+        if (checkThread.joinable())
+            checkThread.join();
+        if (launcherCheckThread.joinable())
+            launcherCheckThread.join();
+    }
 
     while (true)
     {
@@ -1566,6 +1739,39 @@ int main(int argc, char **argv)
             x += artWidth + gap;
         }
 
+        // The launcher's own update button, in the corner where the version used to
+        // sit alone. It is the one control here that is not about a game: the
+        // launcher cannot update itself, so it says what the repository has and
+        // opens the page for you.
+        const auto updateLabel = [&]() -> std::string
+        {
+            const std::string version = std::string("v") + PS2X_LAUNCHER_VERSION;
+            switch (static_cast<LauncherCheck>(launcherCheck.load()))
+            {
+            case LauncherCheck::Running: return version + "  -  checking...";
+            case LauncherCheck::UpToDate: return version + "  -  up to date";
+            case LauncherCheck::Failed: return version + "  -  no answer, try again";
+            case LauncherCheck::Available:
+            {
+                std::lock_guard<std::mutex> lock(launcherVersionMutex);
+                return "launcher " + launcherVersion + " is available  -  click to open";
+            }
+            default: return version + "  -  check for updates";
+            }
+        };
+        // Measured from the label rather than fixed, because the label grows when
+        // there is something to say. It sits in the top-right corner, level with the
+        // subheading - the one row up there short enough to leave the corner free at
+        // any window shape. (The title row and the footer row both reach it, so
+        // neither will do.)
+        const auto updateButton = [&]() -> Rectangle
+        {
+            const int size = px(15);
+            const float boxWidth = static_cast<float>(MeasureText(updateLabel().c_str(), size)) + 28.0f * s;
+            const float boxHeight = 32.0f * s;
+            return {width - boxWidth - 16.0f * s, artY - 50.0f * s, boxWidth, boxHeight};
+        };
+
         // ---------------------------------------------------------- input
         bool activate = false;
         const Vector2 mouse = GetMousePosition();
@@ -1588,7 +1794,7 @@ int main(int argc, char **argv)
         if (mouseMoved || IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsKeyPressed(KEY_LEFT) ||
             IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_A) || IsKeyPressed(KEY_D) || IsKeyPressed(KEY_ENTER) ||
             IsKeyPressed(KEY_SPACE) || IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_F11) || IsKeyPressed(KEY_M) ||
-            IsKeyPressed(KEY_U) || IsKeyPressed(KEY_B))
+            IsKeyPressed(KEY_U) || IsKeyPressed(KEY_B) || IsKeyPressed(KEY_C))
             usingController = false;
 
         // A controller gets the same three actions as the keyboard: the bottom face
@@ -1645,6 +1851,21 @@ int main(int argc, char **argv)
         }
         if ((IsKeyPressed(KEY_U) || padFetch) && games[selected].portConfigured)
             startJob(Job::Fetch, selected, fetchCommand(games[selected]), true);
+
+        // The launcher's own update button. Click it, or press C / L1. When a newer
+        // release is known the same action opens its page instead of asking again.
+        {
+            const Rectangle updateRect = updateButton();
+            const bool asked = IsKeyPressed(KEY_C) || padPressedAny(GAMEPAD_BUTTON_LEFT_TRIGGER_1) ||
+                               (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, updateRect));
+            if (asked)
+            {
+                if (launcherCheck.load() == static_cast<int>(LauncherCheck::Available))
+                    platform::openUrl(releasePageUrl(settings.updateRepo));
+                else
+                    startLauncherCheck();
+            }
+        }
         if ((IsKeyPressed(KEY_F11) || padPressedAny(GAMEPAD_BUTTON_MIDDLE_LEFT)) && screenshotPath.empty())
         {
             ToggleFullscreen();
@@ -1871,6 +2092,7 @@ int main(int argc, char **argv)
             const std::string muteKey = usingController ? pad.mute : "M";
             footer += musicMuted ? ("    -    " + muteKey + ": music off") : ("    -    " + muteKey + ": mute");
         }
+        footer += "    -    " + std::string(usingController ? pad.bumper : "C") + ": updates";
         footer += "    -    " + std::string(usingController ? pad.right : "Esc") + ": quit";
         const float footerWidth = static_cast<float>(MeasureText(footer.c_str(), px(18)));
         DrawText(footer.c_str(), static_cast<int>((width - footerWidth) * 0.5f), static_cast<int>(height - 46.0f * s),
@@ -1886,13 +2108,25 @@ int main(int argc, char **argv)
                      (Color){84, 92, 110, 255});
         }
 
-        // The version, quiet in the corner. It is the first thing anyone needs when
-        // they ask about the launcher, and the last thing that should be in the way.
+        // The update button, where the version used to sit alone: the version, and
+        // the one way to ask whether there is a newer launcher. It lights up when
+        // there is one, because a player who never presses it would never learn -
+        // and it is quiet otherwise, because it is the last thing that should be in
+        // the way.
         {
-            const std::string version = std::string("v") + PS2X_LAUNCHER_VERSION;
-            const float versionWidth = static_cast<float>(MeasureText(version.c_str(), px(14)));
-            DrawText(version.c_str(), static_cast<int>(width - versionWidth - 20.0f * s),
-                     static_cast<int>(height - 22.0f * s), px(14), (Color){70, 78, 96, 255});
+            const Rectangle rect = updateButton();
+            const bool available = launcherCheck.load() == static_cast<int>(LauncherCheck::Available);
+            const bool hot = CheckCollisionPointRec(GetMousePosition(), rect);
+            const Color background = available ? (Color){58, 48, 20, 255}
+                                               : (hot ? (Color){32, 38, 52, 255} : (Color){20, 23, 31, 255});
+            DrawRectangleRounded(rect, 0.4f, 4, background);
+            const std::string label = updateLabel();
+            const int size = px(15);
+            const float textWidth = static_cast<float>(MeasureText(label.c_str(), size));
+            const Color colour = available ? (Color){240, 200, 90, 255}
+                                           : (hot ? (Color){176, 184, 200, 255} : (Color){96, 104, 122, 255});
+            DrawText(label.c_str(), static_cast<int>(rect.x + (rect.width - textWidth) * 0.5f),
+                     static_cast<int>(rect.y + (rect.height - static_cast<float>(size)) * 0.5f), size, colour);
         }
 
         // Lights back up when a game has closed, rather than snapping to it.
@@ -1923,6 +2157,8 @@ int main(int argc, char **argv)
         jobThread.join(); // the loop only leaves once nothing is running
     if (checkThread.joinable())
         checkThread.join();
+    if (launcherCheckThread.joinable())
+        launcherCheckThread.join();
 
     for (Game &game : games)
     {

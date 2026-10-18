@@ -62,6 +62,22 @@ namespace platform
         return access(path.c_str(), X_OK) == 0;
 #endif
     }
+
+    bool openUrl(const std::string &url)
+    {
+#if defined(_WIN32)
+        // ShellExecute is the Windows way, and it wants wide characters. The
+        // launcher's own strings are narrow, so the URL is widened here.
+        const std::wstring wide(url.begin(), url.end());
+        const HINSTANCE result = ShellExecuteW(nullptr, L"open", wide.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        return reinterpret_cast<INT_PTR>(result) > 32; // 32 and below are error codes
+#else
+        // xdg-open is the desktop's own dispatcher; it is not universal, but
+        // nothing better is, and a failure just means the player opens it by hand.
+        const std::string command = "xdg-open \"" + url + "\" >/dev/null 2>&1 &";
+        return std::system(command.c_str()) == 0;
+#endif
+    }
 }
 
 #if defined(_WIN32)

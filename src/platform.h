@@ -24,4 +24,8 @@ namespace platform
     // Whether a file can be run. Windows has no execute bit, so anything there is
     // runnable as far as this is concerned.
     bool fileIsExecutable(const std::string &path);
+
+    // Opens a URL in whatever this desktop uses for one. False only when the
+    // launcher could not even start it, which is all a caller can act on.
+    bool openUrl(const std::string &url);
 }

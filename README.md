@@ -34,6 +34,12 @@ spending an evening on it rather than after.
   between the options and Cross takes the one under the highlight. The build screen
   starts on **Start**; the quit screen starts on **Not now**, because that screen
   exists to catch accidents rather than to help them along.
+- **An update button in the corner**, next to the version. It asks the launcher's
+  own repository what it has released — once at launch, and again whenever you
+  press it — and lights up when there is something newer, with a click opening the
+  release page. The launcher cannot update itself, so this is the whole of it: it
+  tells you, and it takes you there. `C` on a keyboard, the upper shoulder button
+  on a pad.
 - **Fullscreen by default** (F11 swaps), and the whole menu scales to the
   display, so it fills a 1440p monitor rather than sitting small in the middle.
 - Launches whatever is already built, per the paths in `launcher.ini`.
@@ -169,6 +175,10 @@ A game with no theme is simply quiet — it is never an error.
 `[launcher] music_volume` sets how loud the themes are, 0 to 1. Set it to 0 to
 turn menu music off entirely.
 
+`[launcher] update_repo` is the launcher's own repository, which is what the update
+button in the corner asks. A fork points it at itself; there is normally no reason
+to touch it.
+
 ## Handy flags
 
 - `--pads` — list the controllers the launcher can see, with the names it gives
@@ -177,9 +187,13 @@ turn menu music off entirely.
 - `--config <file>` — read a different config instead of `launcher.ini`.
 - `--screenshot <file.png>` — render one frame and exit. Always windowed, at
   1280x720, so a capture is the same size whatever the display. Used to check the
-  layout without a person at the screen.
+  layout without a person at the screen. It waits for the update checks first, so a
+  capture shows the answer rather than "checking...".
 - `--select <n>` — start with the nth card highlighted (pairs with
   `--screenshot` to capture a specific card's state).
+- `--check-updates` — ask the launcher's own repository what it has released and
+  print the answer, without opening a window. What the update button does, for a
+  script.
 
 ## Layout
 

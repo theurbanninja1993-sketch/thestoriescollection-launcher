@@ -42,6 +42,7 @@ namespace builder
         std::string error;
         std::string bootFile;    // the ELF on the disc, and its hash
         std::string bootHash;
+        std::string directory;   // the game's own folder (games/<id>/)
         std::string config;      // recompiler config
         std::string functionMap;
         int learnPasses = 2;

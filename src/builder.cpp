@@ -418,6 +418,7 @@ namespace builder
                 recipe.learnFrames = value;
         }
 
+        recipe.directory = manifest.parent_path().string();
         if (recipe.bootFile.empty() || recipe.bootHash.empty())
         {
             recipe.error = manifest.string() + " does not say which file on the disc is the game";
@@ -821,6 +822,18 @@ namespace builder
             size_t copied = 0, kept = 0;
             installDirectory(generated, join(portDir, "ps2xRuntime/include"), ".h", copied, kept);
             installDirectory(generated, join(portDir, "ps2xRuntime/src/runner"), ".cpp", copied, kept);
+            // The achievement set travels with the game, not with the source: it is
+            // read from beside the runner, so a built game has one and the engine
+            // finds it without being told where to look.
+            std::error_code setEc;
+            const std::string setSource = join(recipe.directory, "achievements.toml");
+            if (fs::exists(setSource, setEc))
+            {
+                fs::copy_file(setSource, join(portDir, "build/ps2xRuntime/achievements.toml"),
+                              fs::copy_options::overwrite_existing, setEc);
+                if (cb.onLine)
+                    cb.onLine("the achievement set travels with the game");
+            }
             if (cb.onLine)
                 cb.onLine("copied " + std::to_string(copied) + ", left " + std::to_string(kept) + " alone");
         }
@@ -1010,6 +1023,9 @@ namespace builder
                       "rem Runs the port from this folder, whatever the current directory is.\r\n"
                       "cd /d \"%~dp0\"\r\n"
                       "ps2EntryRunner.exe %*\r\n");
+            const std::string setSource = join(recipe.directory, "achievements.toml");
+            if (fs::exists(setSource, ec))
+                fs::copy_file(setSource, join(out, "achievements.toml"), fs::copy_options::overwrite_existing, ec);
             const std::string readme = readFile(join(portDir, "docs/PORTABLE.txt"));
             if (!readme.empty())
                 writeFile(join(out, "README.txt"), readme);

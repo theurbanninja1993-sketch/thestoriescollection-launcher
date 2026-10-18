@@ -78,6 +78,76 @@ namespace platform
         return std::system(command.c_str()) == 0;
 #endif
     }
+
+    std::string removeTreeCommand(const std::string &path)
+    {
+        if (path.empty())
+            return {};
+#if defined(_WIN32)
+        // cmd has no rm, and rmdir complains when there is nothing there, which is
+        // the normal case for a first fetch.
+        return "if exist \"" + path + "\" rmdir /s /q \"" + path + "\"";
+#else
+        return "rm -rf \"" + path + "\"";
+#endif
+    }
+
+    std::string gitCommand()
+    {
+        static const std::string found = []() -> std::string
+        {
+#if defined(_WIN32)
+            // Git for Windows installs here by default, and the PATH is often left
+            // alone on purpose. Quiet: the answer is what matters, not the noise.
+            for (const char *root : {"ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"})
+            {
+                const char *base = std::getenv(root);
+                if (base == nullptr)
+                    continue;
+                const std::string candidate = std::string(base) + "\\Git\\cmd\\git.exe";
+                std::error_code ec;
+                if (fs::exists(candidate, ec))
+                    return "\"" + candidate + "\"";
+            }
+#endif
+            return "git";
+        }();
+        return found;
+    }
+
+    bool gitAvailable()
+    {
+        static const bool works = []() -> bool
+        {
+#if defined(_WIN32)
+            const std::string command = gitCommand() + " --version >nul 2>&1";
+#else
+            const std::string command = gitCommand() + " --version >/dev/null 2>&1";
+#endif
+            return std::system(command.c_str()) == 0;
+        }();
+        return works;
+    }
+
+    void becomeDpiAware()
+    {
+#if defined(_WIN32)
+        // Per-monitor v2 where the OS has it (Windows 10 1703+), system-wide DPI
+        // awareness where it does not. Either way the window is real pixels, so the
+        // layout is the size the launcher thinks it is: without this, a display at
+        // 150% hands the launcher a window that is 150% of what it asked for, and
+        // everything drawn for a 1280x720 layout lands in the wrong place.
+        using SetContextFn = BOOL(WINAPI *)(DPI_AWARENESS_CONTEXT);
+        if (HMODULE user32 = LoadLibraryW(L"user32.dll"))
+        {
+            const auto setContext = reinterpret_cast<SetContextFn>(
+                reinterpret_cast<void *>(GetProcAddress(user32, "SetProcessDpiAwarenessContext")));
+            if (setContext != nullptr && setContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
+                return;
+            SetProcessDPIAware();
+        }
+#endif
+    }
 }
 
 #if defined(_WIN32)

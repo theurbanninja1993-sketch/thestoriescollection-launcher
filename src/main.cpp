@@ -83,6 +83,7 @@ namespace
         std::string exe;   // the port's runner; relative paths resolve beside the launcher
         std::string data;  // disc image or extracted folder, passed to the game
         std::string art;   // box art png
+        std::string artDisplay; // the same path as the config has it, for the card's hint
         std::string music; // theme audio, played while this card is highlighted
         bool musicNamed = false; // whether the config named the file, for warnings
         // The port's source, which the launcher fetches itself so a player only has
@@ -364,7 +365,7 @@ namespace
     // needs nothing new, and it is one round trip rather than a rate-limited API.
     std::string launcherUpdateCommand(const Settings &settings)
     {
-        return "git ls-remote --tags \"" + settings.updateRepo + "\" 2>&1";
+        return platform::gitCommand() + " ls-remote --tags \"" + settings.updateRepo + "\" 2>&1";
     }
 
     // The page to send someone to when there is a newer release.
@@ -410,24 +411,27 @@ namespace
     std::string fetchCommand(const Game &game)
     {
         const std::string ref = portRefOf(game);
-        const std::string clone = "git clone --depth 1 --branch \"" + ref + "\" \"" + game.portUrl + "\" \"" +
+        const std::string git = platform::gitCommand();
+        const std::string clone = git + " clone --depth 1 --branch \"" + ref + "\" \"" + game.portUrl + "\" \"" +
                                   game.portDir + "\" 2>&1";
         const bool wipe = safeToWipe(game.portDir);
+        // The wipe is a shell command like the rest, and it is not `rm` on Windows.
+        const std::string clear = wipe ? platform::removeTreeCommand(game.portDir) + " && " : "";
         if (game.portLocal.empty())
-            return (wipe ? "rm -rf \"" + game.portDir + "\" && " : "") + clone;
+            return clear + clone;
 
-        const std::string update = "git -C \"" + game.portDir + "\" fetch --depth 1 origin \"" + ref + "\" 2>&1 && "
-                                   "git -C \"" + game.portDir + "\" reset --hard FETCH_HEAD 2>&1";
+        const std::string update = git + " -C \"" + game.portDir + "\" fetch --depth 1 origin \"" + ref + "\" 2>&1 && " +
+                                   git + " -C \"" + game.portDir + "\" reset --hard FETCH_HEAD 2>&1";
         if (!wipe)
             return update;
-        return update + " || ( echo \"that checkout could not be updated; fetching it again\" && rm -rf \"" +
-               game.portDir + "\" && " + clone + " )";
+        return update + " || ( echo \"that checkout could not be updated; fetching it again\" && " +
+               platform::removeTreeCommand(game.portDir) + " && " + clone + " )";
     }
 
     // What the remote has for the ref, without touching the working tree.
     std::string checkCommand(const Game &game)
     {
-        return "git ls-remote \"" + game.portUrl + "\" \"" + portRefOf(game) + "\" 2>&1";
+        return platform::gitCommand() + " ls-remote \"" + game.portUrl + "\" \"" + portRefOf(game) + "\" 2>&1";
     }
 
     // Where a built game ended up, so nobody has to write these into the config.
@@ -706,8 +710,12 @@ int main(int argc, char **argv)
         game.musicNamed = !game.music.empty();
         game.music = resolve(base, game.musicNamed ? game.music : ("music/" + game.id + ".mp3"));
         // And the cover: art/<id>.png is what a drop-in would be called, so a card
-        // with none still says exactly which file it is waiting for.
-        game.art = resolve(base, game.art.empty() ? ("art/" + game.id + ".png") : game.art);
+        // with none still says exactly which file it is waiting for. The hint keeps
+        // the config's own wording rather than the resolved path, which is absolute
+        // and far too long to sit inside a card.
+        const std::string artNamed = game.art;
+        game.artDisplay = artNamed.empty() ? ("art/" + game.id + ".png") : artNamed;
+        game.art = resolve(base, game.artDisplay);
     }
 
     // --launch skips the menu entirely, so a desktop shortcut can start a game
@@ -726,8 +734,15 @@ int main(int argc, char **argv)
 
     // --pads needs the window to exist, because that is what initialises the pad
     // support; it does not need to be seen.
-    SetConfigFlags(FLAG_WINDOW_HIGHDPI | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT |
-                   (listPads ? FLAG_WINDOW_HIDDEN : 0));
+    //
+    // Deliberately *not* FLAG_WINDOW_HIGHDPI. On Windows that hint sets
+    // GLFW_SCALE_TO_MONITOR, which resizes the window's content area by the
+    // monitor's scale while raylib goes on reporting the size it was asked for -
+    // so on a display at 125% or 150% the layout was drawn for one size inside a
+    // framebuffer of another, and only came right after a fullscreen toggle
+    // refreshed the size. Real pixels everywhere is what this layout wants.
+    platform::becomeDpiAware();
+    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT | (listPads ? FLAG_WINDOW_HIDDEN : 0));
     InitWindow(1280, 720, "The Stories Collection - Launcher");
     if (listPads)
     {
@@ -969,6 +984,12 @@ int main(int argc, char **argv)
     bool buildReportOk = false;
     std::string buildReportDetail;
     std::string buildReportLog;
+
+    // A fetch that fails needs saying too, and for the same reason: it can be over
+    // in milliseconds, so the screen that showed what it was doing is gone before
+    // anyone can read it. That is exactly what "pressing U does nothing" was.
+    bool fetchReport = false;
+    std::string fetchReportDetail;
 
     // Whether a run also cross-compiles Windows. WSL is a Linux machine running on a
     // Windows one, so there the Windows build is the one that is any use; anywhere
@@ -1377,6 +1398,17 @@ int main(int argc, char **argv)
                 }
                 else
                 {
+                    // Said on the screen, not only on a console that is not there when
+                    // the launcher is started from a file manager.
+                    fetchReport = true;
+                    {
+                        std::lock_guard<std::mutex> lock(jobMutex);
+                        fetchReportDetail = jobDetail;
+                    }
+                    if (fetchReportDetail.empty())
+                        fetchReportDetail = "nothing was reported.";
+                    if (!platform::gitAvailable())
+                        fetchReportDetail += "   (git was not found, and the launcher needs it to fetch a game's source. On Windows it is often installed without being added to the PATH.)";
                     std::fprintf(stderr, "[launcher] fetching the %s source failed (status %d)\n",
                                  games[index].id.c_str(), status);
                 }
@@ -1455,6 +1487,31 @@ int main(int argc, char **argv)
             else if (GetKeyPressed() != 0 || IsMouseButtonPressed(MOUSE_BUTTON_LEFT) ||
                      padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_DOWN) || padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
                 buildReport = false;
+            continue;
+        }
+        // A fetch that failed, said the same way a build is. A clone that cannot
+        // start is over in milliseconds, so the screen it was doing that on is gone
+        // before it can be read - which is what "pressing U does nothing" was.
+        if (fetchReport)
+        {
+            const float w = static_cast<float>(GetScreenWidth());
+            const float h = static_cast<float>(GetScreenHeight());
+            const float fs = std::max(0.8f, std::min(2.5f, std::min(w / 1280.0f, h / 720.0f)));
+            const auto px = [fs](float v) { return static_cast<int>(std::lround(v * fs)); };
+
+            BeginDrawing();
+            ClearBackground((Color){12, 13, 17, 255});
+            drawCenteredLines({"Could not fetch the source"}, w * 0.5f, h * 0.5f - 90.0f * fs, px(28),
+                              (Color){240, 170, 120, 255}, 36.0f * fs);
+            drawCenteredLines(wrapText(fetchReportDetail, px(18), w * 0.78f), w * 0.5f, h * 0.5f - 20.0f * fs, px(18),
+                              (Color){200, 208, 224, 255}, 26.0f * fs);
+            drawCenteredLines({usingController ? (pad.bottom + " closes this") : "any key closes this"}, w * 0.5f,
+                              h - 54.0f * fs, px(16), (Color){120, 130, 150, 255}, 22.0f * fs);
+            EndDrawing();
+
+            if (GetKeyPressed() != 0 || IsMouseButtonPressed(MOUSE_BUTTON_LEFT) ||
+                padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_DOWN) || padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
+                fetchReport = false;
             continue;
         }
         if (WindowShouldClose())
@@ -2025,10 +2082,23 @@ int main(int argc, char **argv)
                 const float placeholderWidth = static_cast<float>(MeasureText(placeholder, px(28)));
                 DrawText(placeholder, static_cast<int>(art.x + (art.width - placeholderWidth) * 0.5f),
                          static_cast<int>(art.y + art.height * 0.5f - 14.0f * s), px(28), (Color){70, 78, 96, 255});
-                const char *hint = TextFormat("drop %s here", game.art.c_str());
-                const float hintWidth = static_cast<float>(MeasureText(hint, px(16)));
-                DrawText(hint, static_cast<int>(art.x + (art.width - hintWidth) * 0.5f),
-                         static_cast<int>(art.y + art.height * 0.5f + 22.0f * s), px(16), (Color){58, 64, 80, 255});
+                // Wrapped to the card and clipped to it. The path shown is the one the
+                // config has rather than the resolved one, and even then a long one
+                // folds: a hint that spills over its neighbour reads as a bug rather
+                // than as help.
+                const std::vector<std::string> hintLines =
+                    wrapText("drop " + game.artDisplay + " here", px(15), art.width - 28.0f * s);
+                float hintY = art.y + art.height * 0.5f + 22.0f * s;
+                BeginScissorMode(static_cast<int>(art.x), static_cast<int>(art.y), static_cast<int>(art.width),
+                                 static_cast<int>(art.height));
+                for (const std::string &line : hintLines)
+                {
+                    const float lineWidth = static_cast<float>(MeasureText(line.c_str(), px(15)));
+                    DrawText(line.c_str(), static_cast<int>(art.x + (art.width - lineWidth) * 0.5f),
+                             static_cast<int>(hintY), px(15), (Color){58, 64, 80, 255});
+                    hintY += 20.0f * s;
+                }
+                EndScissorMode();
             }
 
             // The title under the card, wrapped so a long one can never run into

@@ -116,6 +116,11 @@ llvm-mingw is fetched once, 88 MB, into `toolchains/` inside the source. It has 
 come after the VU1 step and with the VU1 programs on the link line; the port's
 handoff notes say why, and it is not obvious.
 
+Fetching a game's source needs **git** on the PATH. On Windows it is often
+installed with "use Git from Git Bash only", which leaves it off the PATH - so the
+launcher also looks in the usual install folder, and says so plainly if it finds
+nothing, rather than reporting a fetch that appears to do nothing.
+
 There is deliberately no file browser. The wizard looks for optical drives, and for
 disc images in a `discs/` folder beside the launcher — put one there, or insert the
 disc and press `B`. It takes every shape a disc comes in: a `.iso`, a raw `.bin`, a

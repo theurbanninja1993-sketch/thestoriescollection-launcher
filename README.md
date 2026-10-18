@@ -116,10 +116,13 @@ llvm-mingw is fetched once, 88 MB, into `toolchains/` inside the source. It has 
 come after the VU1 step and with the VU1 programs on the link line; the port's
 handoff notes say why, and it is not obvious.
 
-Fetching a game's source needs **git** on the PATH. On Windows it is often
-installed with "use Git from Git Bash only", which leaves it off the PATH - so the
-launcher also looks in the usual install folder, and says so plainly if it finds
-nothing, rather than reporting a fetch that appears to do nothing.
+Fetching a game's source needs **nothing installed**: it downloads the branch as
+an archive over HTTPS with `curl` and unpacks it with `tar`, both of which ship
+with Windows 10 and with every desktop Linux. It used to shell out to `git`, which
+was a mistake - Git for Windows is frequently absent (its installer offers "use Git
+from Git Bash only", and a Windows player may only ever have it inside WSL), and
+requiring it to *download* a tarball was never reasonable. The download is smaller
+this way too: the branch's source, without the repository's history.
 
 There is deliberately no file browser. The wizard looks for optical drives, and for
 disc images in a `discs/` folder beside the launcher — put one there, or insert the

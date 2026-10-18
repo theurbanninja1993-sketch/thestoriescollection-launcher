@@ -27,6 +27,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <mutex>
 #include <string>
 #include <system_error>
@@ -363,9 +365,62 @@ namespace
     // What the launcher's own repository has released. Asked over git rather than
     // the GitHub API: git is already required to fetch a game's source, so this
     // needs nothing new, and it is one round trip rather than a rate-limited API.
+    // "https://github.com/owner/repo.git" -> "owner/repo", which is what the API
+    // and archive URLs are built from.
+    std::string repositoryPath(const std::string &url)
+    {
+        std::string text = url;
+        if (text.size() > 4 && text.compare(text.size() - 4, 4, ".git") == 0)
+            text.resize(text.size() - 4);
+        const size_t scheme = text.find("://");
+        const size_t host = scheme == std::string::npos ? 0 : text.find('/', scheme + 3);
+        return host == std::string::npos ? std::string{} : text.substr(host + 1);
+    }
+
+    // The fetched ref's revision, kept beside the source rather than inside it: the
+    // source is wiped and replaced on every fetch, and a player who has only ever
+    // downloaded a tarball has no git to ask.
+    std::string revisionPath(const Game &game) { return game.portDir + ".revision"; }
+
+    // The value of the first "key": "value" in a blob of JSON. Enough for the two
+    // answers the launcher needs - a commit's sha and a release's tag - without
+    // pulling in a JSON library to read them.
+    std::string jsonString(const std::string &text, const std::string &key)
+    {
+        const size_t at = text.find("\"" + key + "\"");
+        if (at == std::string::npos)
+            return {};
+        const size_t colon = text.find(':', at);
+        if (colon == std::string::npos)
+            return {};
+        const size_t open = text.find('"', colon + 1);
+        if (open == std::string::npos)
+            return {};
+        const size_t close = text.find('"', open + 1);
+        if (close == std::string::npos)
+            return {};
+        return text.substr(open + 1, close - open - 1);
+    }
+
+    // The newest release's version: "v0.1.5" in the API's answer becomes "0.1.5".
+    std::string newestReleaseVersion(const std::vector<std::string> &lines)
+    {
+        for (const std::string &line : lines)
+        {
+            const std::string tag = jsonString(line, "tag_name");
+            if (tag.empty())
+                continue;
+            return tag.size() > 1 && tag[0] == 'v' ? tag.substr(1) : tag;
+        }
+        return {};
+    }
+
     std::string launcherUpdateCommand(const Settings &settings)
     {
-        return platform::gitCommand() + " ls-remote --tags \"" + settings.updateRepo + "\" 2>&1";
+        const std::string repository = repositoryPath(settings.updateRepo);
+        if (repository.empty())
+            return {};
+        return "curl -sL \"https://api.github.com/repos/" + repository + "/releases/latest\"";
     }
 
     // The page to send someone to when there is a newer release.
@@ -378,14 +433,34 @@ namespace
     }
 
     // The revision of a fetched tree, or "" when there is not one to read.
+    // The revision of a fetched tree, or "" when there is not one to read.
     std::string readRevision(const std::string &directory)
     {
         if (directory.empty())
             return {};
-        std::mutex discard;
-        std::string line;
-        const std::string command = "git -C \"" + directory + "\" rev-parse HEAD 2>&1";
-        return runCaptured(command, discard, line) == 0 ? line : std::string{};
+        // What the fetch wrote: the API's answer for the ref it downloaded. Read
+        // here rather than through the launcher's readFile, which is declared
+        // further down the file.
+        std::string stored;
+        {
+            std::ifstream in(directory + ".revision", std::ios::binary);
+            std::ostringstream text;
+            text << in.rdbuf();
+            stored = text.str();
+        }
+        const std::string sha = jsonString(stored, "sha");
+        if (sha.size() >= 7)
+            return sha;
+        // A developer's own clone has no such file, and may have git to ask.
+        if (platform::commandExists("git"))
+        {
+            std::mutex discard;
+            std::string line;
+            const std::string command = "git -C \"" + directory + "\" rev-parse HEAD 2>&1";
+            if (runCaptured(command, discard, line) == 0)
+                return line;
+        }
+        return {};
     }
 
     std::string portRefOf(const Game &game) { return game.portRef.empty() ? "main" : game.portRef; }
@@ -408,30 +483,44 @@ namespace
     // fetch that cannot fix it - and the only way out was to find and delete the
     // folder by hand. So: clear whatever is in the way first, and if an existing
     // checkout can no longer be updated, start it again from scratch.
+    // Fetching is a download, not a clone: curl and tar ship with Windows 10 and
+    // with every desktop Linux, and neither needs installing, an account, or git.
+    // Git for Windows is frequently absent - its installer offers "use Git from
+    // Git Bash only", and a Windows player may only ever have it inside WSL - and
+    // requiring it to *download* a tarball was never reasonable.
+    //
+    // The revision is written next to the source rather than inside it, because
+    // the source is wiped and replaced every time: it is the ref's commit, asked
+    // of the API, so the card can say whether the download is the newest one.
     std::string fetchCommand(const Game &game)
     {
+        const std::string repository = repositoryPath(game.portUrl);
+        if (repository.empty())
+            return "echo \"the port's address in launcher.ini is not a github repository\"";
         const std::string ref = portRefOf(game);
-        const std::string git = platform::gitCommand();
-        const std::string clone = git + " clone --depth 1 --branch \"" + ref + "\" \"" + game.portUrl + "\" \"" +
-                                  game.portDir + "\" 2>&1";
-        const bool wipe = safeToWipe(game.portDir);
-        // The wipe is a shell command like the rest, and it is not `rm` on Windows.
-        const std::string clear = wipe ? platform::removeTreeCommand(game.portDir) + " && " : "";
-        if (game.portLocal.empty())
-            return clear + clone;
+        const std::string archive = "https://github.com/" + repository + "/archive/" + ref + ".tar.gz";
+        const std::string revision = "https://api.github.com/repos/" + repository + "/commits/" + ref;
+        const std::string tarball = game.portDir + ".tar.gz";
+        const std::string revisionFile = revisionPath(game);
 
-        const std::string update = git + " -C \"" + game.portDir + "\" fetch --depth 1 origin \"" + ref + "\" 2>&1 && " +
-                                   git + " -C \"" + game.portDir + "\" reset --hard FETCH_HEAD 2>&1";
-        if (!wipe)
-            return update;
-        return update + " || ( echo \"that checkout could not be updated; fetching it again\" && " +
-               platform::removeTreeCommand(game.portDir) + " && " + clone + " )";
+        std::string command;
+        if (safeToWipe(game.portDir))
+            command += platform::removeTreeCommand(game.portDir) + " && ";
+        command += platform::makeDirectoryCommand(game.portDir) + " && ";
+        command += "curl -fL --retry 3 -o \"" + tarball + "\" \"" + archive + "\" 2>&1 && ";
+        command += "tar -xzf \"" + tarball + "\" -C \"" + game.portDir + "\" --strip-components=1 && ";
+        command += "rm -f \"" + tarball + "\" && ";
+        command += "curl -sL -o \"" + revisionFile + "\" \"" + revision + "\"";
+        return command;
     }
 
     // What the remote has for the ref, without touching the working tree.
     std::string checkCommand(const Game &game)
     {
-        return platform::gitCommand() + " ls-remote \"" + game.portUrl + "\" \"" + portRefOf(game) + "\" 2>&1";
+        const std::string repository = repositoryPath(game.portUrl);
+        if (repository.empty())
+            return {};
+        return "curl -sL \"https://api.github.com/repos/" + repository + "/commits/" + portRefOf(game) + "\"";
     }
 
     // Where a built game ended up, so nobody has to write these into the config.
@@ -674,7 +763,7 @@ int main(int argc, char **argv)
             // answer can be read somewhere other than a screenshot.
             std::vector<std::string> lines;
             const int status = runCapturedAll(launcherUpdateCommand(settings), lines);
-            const std::string newest = status == 0 ? highestVersionTag(lines) : std::string{};
+            const std::string newest = status == 0 ? newestReleaseVersion(lines) : std::string{};
             if (newest.empty())
             {
                 std::printf("ps2x-launcher %s - could not ask %s\n", PS2X_LAUNCHER_VERSION,
@@ -935,7 +1024,7 @@ int main(int argc, char **argv)
         {
             std::vector<std::string> lines;
             const int status = runCapturedAll(launcherUpdateCommand(settings), lines);
-            const std::string newest = status == 0 ? highestVersionTag(lines) : std::string{};
+            const std::string newest = status == 0 ? newestReleaseVersion(lines) : std::string{};
             {
                 std::lock_guard<std::mutex> lock(launcherVersionMutex);
                 launcherVersion = newest;
@@ -1407,8 +1496,9 @@ int main(int argc, char **argv)
                     }
                     if (fetchReportDetail.empty())
                         fetchReportDetail = "nothing was reported.";
-                    if (!platform::gitAvailable())
-                        fetchReportDetail += "   (git was not found, and the launcher needs it to fetch a game's source. On Windows it is often installed without being added to the PATH.)";
+                      if (!platform::commandExists("curl"))
+                          fetchReportDetail += "   (curl was not found, and the launcher downloads a game's source "
+                                               "with it. It ships with Windows 10 and with every desktop Linux.)";
                     std::fprintf(stderr, "[launcher] fetching the %s source failed (status %d)\n",
                                  games[index].id.c_str(), status);
                 }

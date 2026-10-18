@@ -79,6 +79,28 @@ namespace platform
 #endif
     }
 
+    std::string makeDirectoryCommand(const std::string &path)
+    {
+        if (path.empty())
+            return {};
+#if defined(_WIN32)
+        // cmd's mkdir makes the whole path, which is what -p is for.
+        return "if not exist \"" + path + "\" mkdir \"" + path + "\"";
+#else
+        return "mkdir -p \"" + path + "\"";
+#endif
+    }
+
+    bool commandExists(const std::string &command)
+    {
+#if defined(_WIN32)
+        const std::string probe = command + " --version >nul 2>&1";
+#else
+        const std::string probe = command + " --version >/dev/null 2>&1";
+#endif
+        return std::system(probe.c_str()) == 0;
+    }
+
     std::string removeTreeCommand(const std::string &path)
     {
         if (path.empty())
@@ -90,43 +112,6 @@ namespace platform
 #else
         return "rm -rf \"" + path + "\"";
 #endif
-    }
-
-    std::string gitCommand()
-    {
-        static const std::string found = []() -> std::string
-        {
-#if defined(_WIN32)
-            // Git for Windows installs here by default, and the PATH is often left
-            // alone on purpose. Quiet: the answer is what matters, not the noise.
-            for (const char *root : {"ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"})
-            {
-                const char *base = std::getenv(root);
-                if (base == nullptr)
-                    continue;
-                const std::string candidate = std::string(base) + "\\Git\\cmd\\git.exe";
-                std::error_code ec;
-                if (fs::exists(candidate, ec))
-                    return "\"" + candidate + "\"";
-            }
-#endif
-            return "git";
-        }();
-        return found;
-    }
-
-    bool gitAvailable()
-    {
-        static const bool works = []() -> bool
-        {
-#if defined(_WIN32)
-            const std::string command = gitCommand() + " --version >nul 2>&1";
-#else
-            const std::string command = gitCommand() + " --version >/dev/null 2>&1";
-#endif
-            return std::system(command.c_str()) == 0;
-        }();
-        return works;
     }
 
     void becomeDpiAware()

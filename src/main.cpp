@@ -1023,6 +1023,8 @@ int main(int argc, char **argv)
     std::atomic<int> launcherCheck{static_cast<int>(LauncherCheck::Never)};
     std::mutex launcherVersionMutex;
     std::string launcherVersion; // the newest release the repository has
+    bool updateOpened = false;   // the page was handed to the browser
+    bool updateRefused = false;  // it was not, so the address is shown instead
     std::thread launcherCheckThread;
     auto startLauncherCheck = [&]
     {
@@ -1912,7 +1914,12 @@ int main(int argc, char **argv)
             case LauncherCheck::Available:
             {
                 std::lock_guard<std::mutex> lock(launcherVersionMutex);
-                return "launcher " + launcherVersion + " is available  -  click to open";
+                const std::string offer = "launcher " + launcherVersion;
+                if (updateOpened)
+                    return offer + "  -  opened in your browser";
+                if (updateRefused)
+                    return offer + "  -  could not open it";
+                return offer + " is available  -  click to open";
             }
             default: return version + "  -  check for updates";
             }
@@ -2019,9 +2026,24 @@ int main(int argc, char **argv)
             if (asked)
             {
                 if (launcherCheck.load() == static_cast<int>(LauncherCheck::Available))
-                    platform::openUrl(releasePageUrl(settings.updateRepo));
+                {
+                    const std::string url = releasePageUrl(settings.updateRepo);
+                    const bool opened = platform::openUrl(url);
+                    updateOpened = opened;
+                    updateRefused = !opened;
+                    // A browser that opens behind a fullscreen launcher is
+                    // indistinguishable from a click that did nothing, so the
+                    // launcher gets out of the way and says what it did either way.
+                    if (opened)
+                        MinimizeWindow();
+                    std::fprintf(stderr, "[launcher] %s %s\n", opened ? "opened" : "could not open", url.c_str());
+                }
                 else
+                {
+                    updateOpened = false;
+                    updateRefused = false;
                     startLauncherCheck();
+                }
             }
         }
         if ((IsKeyPressed(KEY_F11) || padPressedAny(GAMEPAD_BUTTON_MIDDLE_LEFT)) && screenshotPath.empty())
@@ -2298,6 +2320,13 @@ int main(int argc, char **argv)
                                            : (hot ? (Color){176, 184, 200, 255} : (Color){96, 104, 122, 255});
             DrawText(label.c_str(), static_cast<int>(rect.x + (rect.width - textWidth) * 0.5f),
                      static_cast<int>(rect.y + (rect.height - static_cast<float>(size)) * 0.5f), size, colour);
+            if (updateRefused)
+            {
+                const std::string url = releasePageUrl(settings.updateRepo);
+                const int urlWidth = MeasureText(url.c_str(), px(14));
+                DrawText(url.c_str(), static_cast<int>(rect.x + (rect.width - urlWidth) * 0.5f),
+                         static_cast<int>(rect.y + rect.height + 6.0f * s), px(14), (Color){150, 158, 176, 255});
+            }
         }
 
         // Lights back up when a game has closed, rather than snapping to it.

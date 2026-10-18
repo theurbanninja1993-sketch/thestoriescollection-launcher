@@ -35,6 +35,11 @@ namespace platform
     std::string makeDirectoryCommand(const std::string &path);
     std::string removeTreeCommand(const std::string &path);
 
+    // What joins two commands here. cmd has no `;` and a POSIX shell treats `&` as
+    // "run this in the background", so there is no one string that means "and then
+    // do this regardless" to both.
+    const char *commandSeparator();
+
     // Whether a tool can be run, so a failure can name what is missing instead of
     // showing a player a raw shell error.
     bool commandExists(const std::string &command);

@@ -84,8 +84,13 @@ namespace platform
         if (path.empty())
             return {};
 #if defined(_WIN32)
-        // cmd's mkdir makes the whole path, which is what -p is for.
-        return "if not exist \"" + path + "\" mkdir \"" + path + "\"";
+        // cmd's mkdir makes the whole path, which is what -p is for, and it is
+        // called after the wipe, so the directory cannot be there already. Not
+        // guarded by `if`: cmd's `if` takes the *rest of the line* as its command,
+        // so `if not exist X mkdir X && next` runs `next` only when X was already
+        // there - the opposite of what it looks like, and a silent nothing when it
+        // matters.
+        return "mkdir \"" + path + "\" >nul 2>&1";
 #else
         return "mkdir -p \"" + path + "\"";
 #endif
@@ -106,11 +111,23 @@ namespace platform
         if (path.empty())
             return {};
 #if defined(_WIN32)
-        // cmd has no rm, and rmdir complains when there is nothing there, which is
-        // the normal case for a first fetch.
-        return "if exist \"" + path + "\" rmdir /s /q \"" + path + "\"";
+        // cmd has no rm, and rmdir *refuses* a tree with read-only files in it -
+        // which is exactly what a source folder left by a git clone is full of,
+        // since git marks its objects read-only. So the attributes go first, and
+        // both halves are silenced: neither has anything to say when the folder is
+        // simply not there, which is the normal case for a first fetch.
+        return "attrib -h -r -s /s /d \"" + path + "\" >nul 2>&1 & rmdir /s /q \"" + path + "\" >nul 2>&1";
 #else
         return "rm -rf \"" + path + "\"";
+#endif
+    }
+
+    const char *commandSeparator()
+    {
+#if defined(_WIN32)
+        return " & ";
+#else
+        return " ; ";
 #endif
     }
 

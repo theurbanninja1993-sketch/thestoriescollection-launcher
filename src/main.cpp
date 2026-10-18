@@ -503,14 +503,25 @@ namespace
         const std::string tarball = game.portDir + ".tar.gz";
         const std::string revisionFile = revisionPath(game);
 
+        // The two housekeeping steps are unconditional and joined with the
+        // platform's own separator: they have nothing to say when the folder is not
+        // there yet, and a chain that stops on them would stop before it started.
+        // Everything that can actually go wrong is after them, on `&&`, and each
+        // step says what it is doing first, so a failure says where it happened.
+        const std::string join = platform::commandSeparator();
         std::string command;
+        command += "echo fetching " + repository + " " + ref + " && ";
         if (safeToWipe(game.portDir))
-            command += platform::removeTreeCommand(game.portDir) + " && ";
-        command += platform::makeDirectoryCommand(game.portDir) + " && ";
+            command += platform::removeTreeCommand(game.portDir) + join;
+        command += platform::makeDirectoryCommand(game.portDir) + join;
+        command += "echo downloading, about 5 MB && ";
         command += "curl -fL --retry 3 -o \"" + tarball + "\" \"" + archive + "\" 2>&1 && ";
-        command += "tar -xzf \"" + tarball + "\" -C \"" + game.portDir + "\" --strip-components=1 && ";
+        command += "echo unpacking && ";
+        command += "tar -xzf \"" + tarball + "\" -C \"" + game.portDir + "\" --strip-components=1 2>&1 && ";
         command += "rm -f \"" + tarball + "\" && ";
-        command += "curl -sL -o \"" + revisionFile + "\" \"" + revision + "\"";
+        command += "echo asking GitHub which revision that was && ";
+        command += "curl -sL -o \"" + revisionFile + "\" \"" + revision + "\" 2>&1 && ";
+        command += "echo done";
         return command;
     }
 

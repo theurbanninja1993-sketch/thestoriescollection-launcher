@@ -63,3 +63,18 @@ namespace platform
 #endif
     }
 }
+
+#if defined(_WIN32)
+// Laptops with two GPUs - an Optimus one, or an AMD PowerXpress one - run an
+// OpenGL process on the integrated GPU unless the executable asks otherwise, and
+// the GPU renderer wants the discrete one. These two exported variables are how an
+// application asks. Without them the player has to find the vendor's control panel
+// and add the game to it by hand, which is not something a player should have to
+// know about. (NVIDIA's Optimus documentation names the first; the second is AMD's
+// equivalent and is harmless where it does not apply.)
+extern "C"
+{
+    __declspec(dllexport) unsigned long NvOptimusEnablement = 1;
+    __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
+#endif

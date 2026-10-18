@@ -11,6 +11,25 @@
 
 namespace fs = std::filesystem;
 
+namespace
+{
+    // A POSIX shell's single-quoted string: everything inside is literal, and the one
+    // character that cannot appear is escaped by closing, escaping and reopening.
+    std::string quotedForShell(const std::string &text)
+    {
+        std::string out = "'";
+        for (char c : text)
+        {
+            if (c == '\'')
+                out += "'\\''";
+            else
+                out += c;
+        }
+        out += "'";
+        return out;
+    }
+}
+
 namespace platform
 {
     std::string executableDirectory()
@@ -122,6 +141,22 @@ namespace platform
 #endif
     }
 
+    std::string removeFileCommand(const std::string &path)
+    {
+        if (path.empty())
+            return {};
+#if defined(_WIN32)
+        // cmd has no rm. This one cost a real player a real fetch: the whole chain
+        // stopped on "'rm' is not recognized as an internal or external command",
+        // which reads as a download that failed. Quiet, because the file is always
+        // there by this point - the download that wrote it succeeded, or the chain
+        // would never have reached here.
+        return "del /q \"" + path + "\" >nul 2>&1";
+#else
+        return "rm -f \"" + path + "\"";
+#endif
+    }
+
     const char *commandSeparator()
     {
 #if defined(_WIN32)
@@ -152,6 +187,21 @@ namespace platform
         return "(" + command + ") 2>&1";
 #else
         return "{ " + command + " ; } 2>&1";
+#endif
+    }
+
+    bool runScriptDetached(const std::string &scriptPath)
+    {
+        if (scriptPath.empty())
+            return false;
+#if defined(_WIN32)
+        // `start` returns at once, so the launcher is free to exit while the script
+        // waits for it. /min keeps the console window it opens out of the way.
+        return std::system(("start \"\" /min cmd /c \"" + scriptPath + "\"").c_str()) == 0;
+#else
+        // The shell backgrounds the script and exits, so the script outlives the
+        // launcher - which is the whole point of it.
+        return std::system(("sh " + quotedForShell(scriptPath) + " >/dev/null 2>&1 &").c_str()) == 0;
 #endif
     }
 

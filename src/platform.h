@@ -29,11 +29,12 @@ namespace platform
     // launcher could not even start it, which is all a caller can act on.
     bool openUrl(const std::string &url);
 
-    // Commands that make a directory and remove a tree, in whatever shell popen
-    // hands the string to. Windows has no `mkdir -p` and no `rm`, so these are
-    // different commands rather than the same one under another name.
+    // Commands that make a directory, remove a tree and remove a file, in whatever
+    // shell popen hands the string to. Windows has no `mkdir -p` and no `rm`, so
+    // these are different commands rather than the same one under another name.
     std::string makeDirectoryCommand(const std::string &path);
     std::string removeTreeCommand(const std::string &path);
+    std::string removeFileCommand(const std::string &path);
 
     // What joins two commands here. cmd has no `;` and a POSIX shell treats `&` as
     // "run this in the background", so there is no one string that means "and then
@@ -55,6 +56,12 @@ namespace platform
     // Whether a tool can be run, so a failure can name what is missing instead of
     // showing a player a raw shell error.
     bool commandExists(const std::string &command);
+
+    // Starts a script and returns at once, leaving it to outlive this program. The
+    // launcher's own update needs exactly that: on Windows a running program's files
+    // cannot be replaced, so a script has to do the replacing after the launcher has
+    // gone - and it has to still be running when the launcher exits.
+    bool runScriptDetached(const std::string &scriptPath);
 
     // Real pixels instead of a DPI-scaled window, which is what makes the layout
     // the size it thinks it is on a display at 125% or 150%. A no-op away from

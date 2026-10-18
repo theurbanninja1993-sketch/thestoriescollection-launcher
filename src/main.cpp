@@ -253,6 +253,15 @@ namespace
 #endif
     }
 
+    const char *launcherExeName()
+    {
+#if defined(PS2X_LAUNCHER_WINDOWS)
+        return "ps2x_launcher.exe";
+#else
+        return "ps2x_launcher";
+#endif
+    }
+
     // Runs a command, keeping the last line it printed: that is what the fetch
     // screen shows while it works. Output is captured rather than inherited so the
     // screen can report it, and stderr is folded in because git prints progress
@@ -432,6 +441,221 @@ namespace
         return url + "/releases/latest";
     }
 
+    // ------------------------------------------------------- the launcher's own update
+    // The launcher can fetch a new version of itself and put it in place, which is a
+    // better end to the flow than handing the player a web page and hoping. What it
+    // cannot do is replace its own files while it is running - on Windows they are
+    // locked, and on either platform the code that would run afterwards is not the
+    // code being replaced. So the work is split: the download and the unpack happen
+    // now, into a staging folder that has nothing to do with the install, and a small
+    // script does the swap once the launcher has exited.
+
+    const char *launcherArchiveExtension()
+    {
+#if defined(PS2X_LAUNCHER_WINDOWS)
+        // The zip, because PowerShell opens one on any Windows that can run this at
+        // all - and because the fetch just taught us what a command that only exists
+        // on the other platform does to a player's evening.
+        return ".zip";
+#else
+        return ".tar.gz";
+#endif
+    }
+
+    // The release asset's name, which tools/make_release.sh decides and which is
+    // therefore known rather than looked up. No API call, no JSON to parse, and no
+    // chance of picking the other platform's file.
+    std::string launcherAssetName(const std::string &repository, const std::string &version)
+    {
+        const std::string path = repositoryPath(repository);
+        const size_t slash = path.find('/');
+        const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+        return name + "-" + version + "-" + platformFolder() + launcherArchiveExtension();
+    }
+
+    std::string launcherAssetUrl(const std::string &repository, const std::string &version)
+    {
+        return "https://github.com/" + repositoryPath(repository) + "/releases/download/v" + version + "/" +
+               launcherAssetName(repository, version);
+    }
+
+    // Where a downloaded launcher waits to be put in place, and where the script that
+    // puts it there is written. Both live in the system's temp folder rather than
+    // beside the launcher: a download that fails half way must not leave anything
+    // half-written in the one folder that has to keep working.
+    std::string updateStagingDirectory()
+    {
+        std::error_code ec;
+        const std::filesystem::path temp = std::filesystem::temp_directory_path(ec);
+        const std::filesystem::path root = ec ? std::filesystem::path(".") : temp;
+        return (root / "thestoriescollection-launcher-update").string();
+    }
+
+    std::string updateScriptPath()
+    {
+        return updateStagingDirectory() +
+#if defined(PS2X_LAUNCHER_WINDOWS)
+               ".cmd";
+#else
+               ".sh";
+#endif
+    }
+
+    // A path as a shell's single-quoted string, for the script below. The POSIX one
+    // is the awkward one; cmd has no quoting problem worth solving, because the paths
+    // in it are set with `set "X=..."` and used as `"%X%"`.
+    std::string quotedForScript(const std::string &text)
+    {
+        std::string out = "'";
+        for (char c : text)
+        {
+            if (c == '\'')
+                out += "'\\''";
+            else
+                out += c;
+        }
+        out += "'";
+        return out;
+    }
+
+    // The script that does the swap. It waits for the launcher to exit, keeps the old
+    // executable rather than deleting it - if the new one turns out to be broken,
+    // renaming it back is the way out - puts the staged files in place, starts the
+    // launcher again, and deletes itself.
+    std::string updaterScript(const std::string &install, const std::string &staging, const std::string &exeName)
+    {
+        std::ostringstream script;
+#if defined(PS2X_LAUNCHER_WINDOWS)
+        // CRLF, because this is a batch file: cmd is written for its own line ending.
+        script << "@echo off\r\n";
+        script << "rem Written by The Stories Collection launcher, to put a new version of\r\n";
+        script << "rem itself in place after it has exited.\r\n";
+        script << "set \"HERE=" << install << "\"\r\n";
+        script << "set \"STAGE=" << staging << "\"\r\n";
+        script << "if not exist \"%HERE%\\" << exeName << "\" goto copy\r\n";
+        script << ":wait\r\n";
+        script << "rem A running executable cannot be renamed, so this failing means it is\r\n";
+        script << "rem still up. Nothing else can tell us as reliably.\r\n";
+        script << "move /y \"%HERE%\\" << exeName << "\" \"%HERE%\\" << exeName << ".old\" >nul 2>&1\r\n";
+        script << "if errorlevel 1 (\r\n";
+        script << "    timeout /t 1 /nobreak >nul\r\n";
+        script << "    goto wait\r\n";
+        script << ")\r\n";
+        script << ":copy\r\n";
+        script << "xcopy /e /y /i /q \"%STAGE%\\*\" \"%HERE%\\\" >nul 2>&1\r\n";
+        script << "rmdir /s /q \"%STAGE%\" >nul 2>&1\r\n";
+        script << "del /q \"%STAGE%.zip\" >nul 2>&1\r\n";
+        script << "start \"\" \"%HERE%\\" << exeName << "\"\r\n";
+        script << "rem A batch file that deletes itself mid-run can lose the lines after\r\n";
+        script << "rem it, so another process does the deleting.\r\n";
+        script << "start \"\" /min cmd /c del \"%~f0\"\r\n";
+#else
+        script << "#!/bin/sh\n";
+        script << "# Written by The Stories Collection launcher, to put a new version of\n";
+        script << "# itself in place after it has exited.\n";
+        script << "HERE=" << quotedForScript(install) << "\n";
+        script << "STAGE=" << quotedForScript(staging) << "\n";
+        script << "sleep 1\n";
+        script << "if [ -f \"$HERE/" << exeName << "\" ]; then\n";
+        script << "    mv -f \"$HERE/" << exeName << "\" \"$HERE/" << exeName << ".old\" 2>/dev/null\n";
+        script << "fi\n";
+        script << "cp -a \"$STAGE\"/. \"$HERE\"/ 2>/dev/null\n";
+        script << "rm -rf \"$STAGE\"\n";
+        script << "rm -f \"$STAGE.tar.gz\"\n";
+        script << "chmod +x \"$HERE/" << exeName << "\" 2>/dev/null\n";
+        script << "\"$HERE/" << exeName << "\" >/dev/null 2>&1 &\n";
+        script << "rm -f \"$0\"\n";
+#endif
+        return script.str();
+    }
+
+    // Puts the unpacked release where the swap can find it: the archive holds one
+    // folder named after the release, the player's own launcher.ini is kept rather
+    // than replaced by the one that ships, the executable has to actually be there,
+    // and the script that does the swap is written. Returns "" when it is ready, or
+    // why it could not be.
+    std::string stageLauncherUpdate(const std::string &install, const std::string &staging,
+                                    const std::string &exeName, const std::string &script)
+    {
+        std::error_code ec;
+        std::filesystem::path folder;
+        int folders = 0;
+        for (const std::filesystem::directory_entry &entry : std::filesystem::directory_iterator(staging, ec))
+        {
+            if (!entry.is_directory())
+                continue;
+            folder = entry.path();
+            ++folders;
+        }
+        if (ec)
+            return "the archive did not unpack (" + ec.message() + ")";
+        if (folders != 1)
+            return "the archive did not unpack into one folder";
+        for (const std::filesystem::directory_entry &entry : std::filesystem::directory_iterator(folder, ec))
+        {
+            std::filesystem::rename(entry.path(), std::filesystem::path(staging) / entry.path().filename(), ec);
+            if (ec)
+                return "the unpacked files could not be moved into place (" + ec.message() + ")";
+        }
+        std::filesystem::remove_all(folder, ec);
+
+        // The one file in there that belongs to the player and not to the release.
+        const std::string theirs = install + "/launcher.ini";
+        if (std::filesystem::exists(theirs, ec))
+        {
+            std::filesystem::copy_file(theirs, staging + "/launcher.ini",
+                                       std::filesystem::copy_options::overwrite_existing, ec);
+            if (ec)
+                return "the launcher's own settings could not be kept (" + ec.message() + ")";
+        }
+        if (!std::filesystem::exists(staging + "/" + exeName, ec))
+            return std::string("the archive did not contain ") + exeName;
+
+        std::ofstream out(script, std::ios::binary | std::ios::trunc);
+        if (!out)
+            return "the update script could not be written";
+        out << updaterScript(install, staging, exeName);
+        out.close();
+        // A script that cannot be run is not a script. Windows has no such bit.
+        std::filesystem::permissions(script, std::filesystem::perms::owner_all,
+                                     std::filesystem::perm_options::add, ec);
+        return {};
+    }
+
+    // Getting the new launcher here: the asset for this platform, unpacked into the
+    // staging folder. Nothing in this touches the launcher itself.
+    std::string launcherInstallCommand(const std::string &url, const std::string &archive,
+                                       const std::string &staging)
+    {
+        std::string command;
+        command += "echo downloading the new launcher && ";
+        command += "curl -fL --retry 3 -o \"" + archive + "\" \"" + url + "\" && ";
+        command += "echo unpacking && ";
+#if defined(PS2X_LAUNCHER_WINDOWS)
+        // PowerShell is on every Windows that can run this, and it opens a zip with
+        // nothing installed - no tar, no 7-Zip, nothing to go wrong.
+        command += "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Expand-Archive -LiteralPath '" +
+                   archive + "' -DestinationPath '" + staging + "' -Force\"";
+#else
+        command += "tar -xzf \"" + archive + "\" -C \"" + staging + "\"";
+#endif
+        command += " && echo done";
+        return command;
+    }
+
+    // The whole of the update's shell work: fetch the asset for this platform and
+    // unpack it into the staging folder. Shared by the button and by --self-update,
+    // so there is one place to be right rather than two that can drift apart.
+    std::string launcherUpdateShellCommand(const Settings &settings, const std::string &version)
+    {
+        const std::string staging = updateStagingDirectory();
+        const std::string archive = staging + launcherArchiveExtension();
+        return platform::captureEverything(
+            platform::removeTreeCommand(staging) + platform::commandSeparator() +
+            platform::makeDirectoryCommand(staging) + platform::commandSeparator() +
+            launcherInstallCommand(launcherAssetUrl(settings.updateRepo, version), archive, staging));
+    }
+
     // The revision of a fetched tree, or "" when there is not one to read.
     // The revision of a fetched tree, or "" when there is not one to read.
     std::string readRevision(const std::string &directory)
@@ -520,6 +744,13 @@ namespace
         const std::string join = platform::commandSeparator();
         std::string command;
         command += "echo fetching " + repository + " " + ref + " && ";
+        // The parent has to exist before the shell moves into it: on a first fetch it
+        // does not, and a `cd` into a folder that is not there carries on regardless -
+        // leaving every relative name after it pointing somewhere else. That is how a
+        // download landed beside the port instead of in it, and how the unpack then
+        // failed on a folder it had just been told to create.
+        if (!parent.empty())
+            command += platform::makeDirectoryCommand(parent) + join;
         command += platform::changeDirectoryCommand(parent) + join;
         if (safeToWipe(game.portDir))
             command += platform::removeTreeCommand(game.portDir) + join;
@@ -528,7 +759,7 @@ namespace
         command += "curl -fL --retry 3 -o \"" + tarball + "\" \"" + archive + "\" && ";
         command += "echo unpacking && ";
         command += "tar -xzf \"" + tarball + "\" -C \"" + folder + "\" --strip-components=1 && ";
-        command += "rm -f \"" + tarball + "\" && ";
+        command += platform::removeFileCommand(tarball) + " && ";
         command += "echo asking GitHub which revision that was && ";
         command += "curl -sL -o \"" + revisionFile + "\" \"" + revision + "\" && ";
         command += "echo done";
@@ -756,6 +987,7 @@ int main(int argc, char **argv)
     int startSelection = -1;
     int launchIndex = -1;
     bool listPads = false;
+    std::string selfUpdateVersion;
     for (int i = 1; i < argc; ++i)
     {
         if (std::strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc)
@@ -776,6 +1008,35 @@ int main(int argc, char **argv)
             for (size_t i = 0; i < games.size(); ++i)
                 std::printf("%zu\t%s\t%s\n", i, games[i].id.c_str(),
                             games[i].available ? "available" : "coming soon");
+            return 0;
+        }
+        else if (std::strcmp(argv[i], "--self-update") == 0 && i + 1 < argc)
+        {
+            selfUpdateVersion = argv[++i];
+            // The button, without the window: how this was tested, and how a player
+            // who is stuck can be walked through it.
+            const std::string staging = updateStagingDirectory();
+            const std::string command = launcherUpdateShellCommand(settings, selfUpdateVersion);
+            std::vector<std::string> lines;
+            const int status = runCapturedAll(command, lines);
+            for (const std::string &line : lines)
+                std::printf("  %s\n", line.c_str());
+            if (status != 0)
+            {
+                std::printf("ps2x-launcher %s - could not fetch %s\n", PS2X_LAUNCHER_VERSION,
+                            selfUpdateVersion.c_str());
+                return 1;
+            }
+            const std::string reason = stageLauncherUpdate(directory, staging, launcherExeName(), updateScriptPath());
+            if (!reason.empty())
+            {
+                std::printf("ps2x-launcher %s - %s\n", PS2X_LAUNCHER_VERSION, reason.c_str());
+                return 1;
+            }
+            std::printf("ps2x-launcher %s - %s is staged in %s\n", PS2X_LAUNCHER_VERSION, selfUpdateVersion.c_str(),
+                        staging.c_str());
+            std::printf("  the swap runs once this has exited: %s\n", updateScriptPath().c_str());
+            platform::runScriptDetached(updateScriptPath());
             return 0;
         }
         else if (std::strcmp(argv[i], "--check-updates") == 0)
@@ -1035,6 +1296,10 @@ int main(int argc, char **argv)
     std::string launcherVersion; // the newest release the repository has
     bool updateOpened = false;   // the page was handed to the browser
     bool updateRefused = false;  // it was not, so the address is shown instead
+    bool updateHandOver = false; // the new files are staged and the script is ready
+    bool updateFailed = false;   // it could not be done, so the page was opened
+    std::string updateTarget;    // the version being put in place
+    std::string updateDetail;    // what the attempt last said
     std::thread launcherCheckThread;
     auto startLauncherCheck = [&]
     {
@@ -1067,7 +1332,7 @@ int main(int argc, char **argv)
     // One background job at a time: the game, or fetching a port's source. Waiting
     // in a thread rather than blocking the loop is what lets the launcher keep
     // answering the window manager while it works, and notice the moment it ends.
-    enum class Job { None, Game, Fetch, Build };
+    enum class Job { None, Game, Fetch, Build, Launcher };
     std::atomic<int> jobKind{static_cast<int>(Job::None)};
     std::atomic<int> jobStatus{0};
     std::thread jobThread;
@@ -1134,41 +1399,89 @@ int main(int argc, char **argv)
         std::fprintf(stderr, "[launcher] %s\n", command.c_str());
         jobThread = std::thread([&, kind, index, command, captureOutput]
         {
-            if (kind != Job::Fetch)
+            // A fetch and the launcher's own update both keep every line they print,
+            // because a failure is usually the one line a step said - and the screen
+            // that showed it is gone by the time anyone can read it.
+            if (kind == Job::Fetch || kind == Job::Launcher)
             {
-                jobStatus = captureOutput ? runCaptured(command, jobMutex, jobDetail) : std::system(command.c_str());
+                const bool update = kind == Job::Launcher;
+                std::vector<std::string> lines;
+                jobStatus = runCapturedAll(command, lines);
+                std::string tail;
+                for (const std::string &line : lines)
+                {
+                    tail += line;
+                    tail += "\n";
+                }
+                const std::string logPath =
+                    base + "/logs/" + (update ? std::string("launcher-update.log")
+                                              : games[index].id + "-fetch.log");
+                std::error_code logEc;
+                std::filesystem::create_directories(std::filesystem::path(logPath).parent_path(), logEc);
+                {
+                    std::ofstream out(logPath, std::ios::binary | std::ios::trunc);
+                    if (out)
+                        out << tail;
+                }
+                // The update is not over when the download is: the archive unpacks
+                // into a folder named after the release, and the swap needs a script.
+                std::string reason;
+                if (update && jobStatus == 0)
+                {
+                    reason = stageLauncherUpdate(directory, updateStagingDirectory(), launcherExeName(),
+                                                 updateScriptPath());
+                    if (!reason.empty())
+                    {
+                        std::fprintf(stderr, "[launcher] %s\n", reason.c_str());
+                        jobStatus = 1;
+                    }
+                }
+                {
+                    std::lock_guard<std::mutex> lock(jobMutex);
+                    if (!reason.empty())
+                        jobDetail = reason;
+                    else
+                    {
+                        jobDetail = lines.empty() ? std::string{} : lines.back();
+                        for (auto it = lines.rbegin(); it != lines.rend() && jobDetail.size() < 40; ++it)
+                        {
+                            if (it != lines.rbegin())
+                                jobDetail = *it + " / " + jobDetail;
+                        }
+                    }
+                }
                 jobKind = static_cast<int>(Job::None);
                 return;
             }
-            // A fetch keeps every line it printed, because a failure is usually the
-            // one line a step said - and the screen is gone by the time it is read.
-            std::vector<std::string> lines;
-            jobStatus = runCapturedAll(command, lines);
-            std::string tail;
-            for (const std::string &line : lines)
-            {
-                tail += line;
-                tail += "\n";
-            }
-            const std::string logPath = base + "/logs/" + games[index].id + "-fetch.log";
-            std::error_code logEc;
-            std::filesystem::create_directories(std::filesystem::path(logPath).parent_path(), logEc);
-            {
-                std::ofstream out(logPath, std::ios::binary | std::ios::trunc);
-                if (out)
-                    out << tail;
-            }
-            {
-                std::lock_guard<std::mutex> lock(jobMutex);
-                jobDetail = lines.empty() ? std::string{} : lines.back();
-                for (auto it = lines.rbegin(); it != lines.rend() && jobDetail.size() < 40; ++it)
-                {
-                    if (it != lines.rbegin())
-                        jobDetail = *it + " / " + jobDetail;
-                }
-            }
+            jobStatus = captureOutput ? runCaptured(command, jobMutex, jobDetail) : std::system(command.c_str());
             jobKind = static_cast<int>(Job::None);
         });
+    };
+
+    // The launcher's own update. The asset for this platform is downloaded into a
+    // staging folder and unpacked there, and when that is done a script is ready to
+    // put it in place - which happens after the launcher has exited, the only time it
+    // can. Everything here is on the menu thread, so a failure leaves the launcher
+    // exactly as it was and the click falls back to the release page.
+    auto startLauncherUpdate = [&](const std::string &version) -> bool
+    {
+        if (version.empty() || jobKind.load() != static_cast<int>(Job::None))
+            return false;
+        if (repositoryPath(settings.updateRepo).empty())
+            return false;
+        // Only an installed copy updates itself. A developer's build has the binary
+        // in build/ and the settings somewhere else, and replacing that folder would
+        // drop a release's launcher.ini where the next run would find it.
+        if (base != directory)
+            return false;
+
+        const std::string command = launcherUpdateShellCommand(settings, version);
+        updateTarget = version;
+        updateFailed = false;
+        updateOpened = false;
+        updateRefused = false;
+        startJob(Job::Launcher, selected, command, false);
+        return true;
     };
 
     // A build is a sequence rather than one command, so the thread runs the sequence
@@ -1325,6 +1638,32 @@ int main(int argc, char **argv)
                               w * 0.5f, h - 74.0f * fs, px(16), (Color){104, 112, 130, 255}, 22.0f * fs);
             drawCenteredLines({usingController ? (padNames().right + " stops it") : "Esc stops it"}, w * 0.5f,
                               h - 44.0f * fs, px(16), (Color){104, 112, 130, 255}, 22.0f * fs);
+            return;
+        }
+
+        // The launcher's own update. Short, but it is the one job that ends with the
+        // launcher closing and starting itself again, so it says so rather than
+        // leaving a window that vanishes and a new one that appears.
+        if (kind == Job::Launcher)
+        {
+            const std::vector<std::string> heading =
+                wrapText("Updating the launcher to " + updateTarget, px(26), w * 0.8f);
+            std::string detail;
+            {
+                std::lock_guard<std::mutex> lock(jobMutex);
+                detail = jobDetail;
+            }
+            float y = (h - 170.0f * fs - static_cast<float>(heading.size()) * 34.0f * fs) * 0.5f;
+            drawCenteredLines(heading, w * 0.5f, y, px(26), (Color){236, 240, 248, 255}, 34.0f * fs);
+            y += static_cast<float>(heading.size()) * 34.0f * fs + 20.0f * fs;
+            if (!detail.empty())
+                drawCenteredLines({wrapText(detail, px(18), w * 0.8f).back()}, w * 0.5f, y, px(18),
+                                  (Color){150, 158, 176, 255}, 24.0f * fs);
+            y += 44.0f * fs;
+            drawCenteredLines(wrapText("The launcher closes and starts again by itself. Nothing in this folder is "
+                                       "replaced until it has.",
+                                       px(16), w * 0.8f),
+                              w * 0.5f, y, px(16), (Color){104, 112, 130, 255}, 22.0f * fs);
             return;
         }
 
@@ -1532,6 +1871,33 @@ int main(int argc, char **argv)
                                      games[index].id.c_str());
                 }
             }
+            else if (finished == Job::Launcher)
+            {
+                if (status == 0)
+                {
+                    // The new files are staged and the script that swaps them is
+                    // written. Nothing is left but to get out of the way, and that
+                    // happens once the loop is over - the window has to close first.
+                    updateHandOver = true;
+                }
+                else
+                {
+                    // A click that asked for an update should still leave a way to
+                    // get one, so the page is opened as a fallback and the button
+                    // says what happened.
+                    updateFailed = true;
+                    {
+                        std::lock_guard<std::mutex> lock(jobMutex);
+                        updateDetail = jobDetail;
+                    }
+                    const std::string url = releasePageUrl(settings.updateRepo);
+                    updateOpened = platform::openUrl(url);
+                    updateRefused = !updateOpened;
+                    if (updateOpened)
+                        MinimizeWindow();
+                    std::fprintf(stderr, "[launcher] the launcher update failed: %s\n", updateDetail.c_str());
+                }
+            }
             else if (index >= 0 && index < static_cast<int>(games.size()))
             {
                 games[index].portLocal = readRevision(games[index].portDir);
@@ -1551,15 +1917,19 @@ int main(int argc, char **argv)
                     }
                     if (fetchReportDetail.empty())
                         fetchReportDetail = "nothing was reported.";
-                      fetchReportDetail += "   (the whole thing is in logs/" + games[index].id + "-fetch.log)";
-                      if (!platform::commandExists("curl"))
-                          fetchReportDetail += "   (curl was not found, and the launcher downloads a game's source "
-                                               "with it. It ships with Windows 10 and with every desktop Linux.)";
+                    fetchReportDetail += "   (the whole thing is in logs/" + games[index].id + "-fetch.log)";
+                    if (!platform::commandExists("curl"))
+                        fetchReportDetail += "   (curl was not found, and the launcher downloads a game's source "
+                                             "with it. It ships with Windows 10 and with every desktop Linux.)";
                     std::fprintf(stderr, "[launcher] fetching the %s source failed (status %d)\n",
                                  games[index].id.c_str(), status);
                 }
             }
         }
+        // The launcher's own update leaves by the door: the new files are staged and
+        // the script that swaps them is written, so there is nothing left to draw.
+        if (updateHandOver)
+            break;
         // How the build ended, and where to read the rest. A build that failed used
         // to put the player back on the menu with the card unchanged and nothing
         // said at all; the reason is the most useful thing the launcher has, so it
@@ -1958,11 +2328,17 @@ int main(int argc, char **argv)
             {
                 std::lock_guard<std::mutex> lock(launcherVersionMutex);
                 const std::string offer = "launcher " + launcherVersion;
-                if (updateOpened)
-                    return offer + "  -  opened in your browser";
-                if (updateRefused)
-                    return offer + "  -  could not open it";
-                return offer + " is available  -  click to open";
+                // The click fetches the new one and puts it in place, so "opened in
+                // your browser" only belongs here when that could not be done.
+                if (updateFailed)
+                {
+                    if (updateOpened)
+                        return offer + "  -  could not update it, opened the page";
+                    if (updateRefused)
+                        return offer + "  -  could not update it, see logs/launcher-update.log";
+                    return offer + "  -  could not update it";
+                }
+                return offer + " is available  -  click to update";
             }
             default: return version + "  -  check for updates";
             }
@@ -2070,16 +2446,26 @@ int main(int argc, char **argv)
             {
                 if (launcherCheck.load() == static_cast<int>(LauncherCheck::Available))
                 {
-                    const std::string url = releasePageUrl(settings.updateRepo);
-                    const bool opened = platform::openUrl(url);
-                    updateOpened = opened;
-                    updateRefused = !opened;
-                    // A browser that opens behind a fullscreen launcher is
-                    // indistinguishable from a click that did nothing, so the
-                    // launcher gets out of the way and says what it did either way.
-                    if (opened)
-                        MinimizeWindow();
-                    std::fprintf(stderr, "[launcher] %s %s\n", opened ? "opened" : "could not open", url.c_str());
+                    std::string newest;
+                    {
+                        std::lock_guard<std::mutex> lock(launcherVersionMutex);
+                        newest = launcherVersion;
+                    }
+                    // Fetch the new one and put it in place. Handing the player a page
+                    // is only what happens when that cannot be done at all.
+                    if (!startLauncherUpdate(newest))
+                    {
+                        const std::string url = releasePageUrl(settings.updateRepo);
+                        const bool opened = platform::openUrl(url);
+                        updateOpened = opened;
+                        updateRefused = !opened;
+                        // A browser that opens behind a fullscreen launcher is
+                        // indistinguishable from a click that did nothing, so the
+                        // launcher gets out of the way and says what it did either way.
+                        if (opened)
+                            MinimizeWindow();
+                        std::fprintf(stderr, "[launcher] %s %s\n", opened ? "opened" : "could not open", url.c_str());
+                    }
                 }
                 else
                 {
@@ -2413,5 +2799,13 @@ int main(int argc, char **argv)
     if (audioReady)
         CloseAudioDevice(); // raylib wants the audio device closed before the window
     CloseWindow();
+
+    // The launcher's own update: the new files are staged and a script is ready to
+    // put them in place, so all that is left is to get out of its way. The window is
+    // closed first, because on Windows a running program's files cannot be replaced
+    // at all and the script waits for this process to end.
+    if (updateHandOver)
+        platform::runScriptDetached(updateScriptPath());
+
     return 0;
 }

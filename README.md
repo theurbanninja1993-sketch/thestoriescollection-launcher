@@ -36,10 +36,14 @@ spending an evening on it rather than after.
   exists to catch accidents rather than to help them along.
 - **An update button in the corner**, next to the version. It asks the launcher's
   own repository what it has released — once at launch, and again whenever you
-  press it — and lights up when there is something newer, with a click opening the
-  release page. The launcher cannot update itself, so this is the whole of it: it
-  tells you, and it takes you there. `C` on a keyboard, the upper shoulder button
-  on a pad.
+  press it — and lights up when there is something newer. Clicking it **fetches
+  the new version and puts it in place**: the launcher downloads the release for
+  your platform into a temp folder, unpacks it, and hands the swap to a small
+  script that runs once the launcher has closed, keeping your `launcher.ini`, your
+  art, your music and your discs, and keeping the old executable as
+  `ps2x_launcher.old`. It starts again by itself. If the update cannot be done at
+  all, the click opens the release page instead and the button says so.
+  `C` on a keyboard, the upper shoulder button on a pad.
 - **Fullscreen by default** (F11 swaps), and the whole menu scales to the
   display, so it fills a 1440p monitor rather than sitting small in the middle.
 - Launches whatever is already built, per the paths in `launcher.ini`.
@@ -200,8 +204,12 @@ to touch it.
 - `--select <n>` — start with the nth card highlighted (pairs with
   `--screenshot` to capture a specific card's state).
 - `--check-updates` — ask the launcher's own repository what it has released and
-  print the answer, without opening a window. What the update button does, for a
-  script.
+  print the answer, without opening a window. What the update button does first,
+  for a script.
+- `--self-update <version>` — do the update the button does: fetch that release,
+  stage it, and hand the swap to the script, without opening a window. Everything
+  the button does apart from the button, which is how it was tested and how someone
+  who is stuck can be walked through it.
 
 ## Layout
 

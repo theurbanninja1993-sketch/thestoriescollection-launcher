@@ -56,14 +56,13 @@ spending an evening on it rather than after.
 
 ## What is coming
 
-- **Phase 2 — the builder wizard.** Fetching the source is already in, on the `U`
-  key. The wizard takes it from there: point it at your own disc (read straight
-  from the drive, or a `.iso` / `.bin` you already made) and it verifies the disc,
-  extracts it, runs the VU1 learning passes and compiles the game, then hands
-  you back to this menu. Nothing of Rockstar's is shipped — your disc produces
-  it. `U` plus a disc becomes the whole install.
-- **Phase 3 — the build orchestration** (bundled toolchain, progress and ETA).
-- **Phase 4 — packaging per OS.**
+- **Bundling the toolchain**, so a build does not want cmake and a C++ compiler
+  installed first.
+- **A time estimate per step**, rather than the step list and a running clock.
+- **Packaging per OS** — one file to run for each platform.
+
+The wizard itself is here: `U` fetches the source, `B` builds the game from your
+own disc, and Cross plays it.
 
 ## Where the game comes from
 
@@ -112,19 +111,28 @@ come after the VU1 step and with the VU1 programs on the link line; the port's
 handoff notes say why, and it is not obvious.
 
 There is deliberately no file browser. The wizard looks for optical drives, and for
-`.iso`/`.bin` files in a `discs/` folder beside the launcher — put the image there,
-or insert the disc and press `B`. A `disc=` line in `launcher.ini` names a specific
-one instead, which skips the search entirely.
+disc images in a `discs/` folder beside the launcher — put one there, or insert the
+disc and press `B`. It takes every shape a disc comes in: a `.iso`, a raw `.bin`, a
+`.cue` sheet naming one of those, or a **`.chd`** — which is what a lot of people keep
+their library in, and is read directly rather than needing to be unpacked first. A
+`disc=` line in `launcher.ini` names a specific one instead, which skips the search
+entirely.
 
-`Esc` stops a build. If that catches a compiler mid-write, the next build notices
-and cleans what it touched, rather than trusting a half-written file that cmake
-would otherwise consider up to date.
+`Esc` stops a build, and it can be started again: every step skips what is already
+done, so a build carries on from where it stopped. If that catches a compiler
+mid-write, the next build notices and cleans what it touched, rather than trusting a
+half-written file that cmake would otherwise consider up to date.
+
+When a build ends — finished, failed or stopped — the launcher says so rather than
+dropping you back on the menu, and names the log it wrote: `logs/<game>-build.log`
+beside the launcher, holding every line the build printed, with the reason for a
+failure as its last line. The card then reads `not built` again and `B` retries.
 
 The same pipeline runs from a terminal, which is what packaging and cross-compiling
 use:
 
 ```sh
-cd port/vcs && ./build.sh --image /dev/sr0     # or a .iso / folder you have
+cd port/vcs && ./build.sh --image /dev/sr0     # or a .iso / .bin / .cue / .chd / folder
 ```
 
 **All of this is Linux.** The Windows port is cross-compiled from Linux and has
@@ -178,6 +186,8 @@ turn menu music off entirely.
     launcher.ini        the games, their source, their paths and their state
     art/                box art (supplied by you)
     music/              theme music (supplied by you)
+    discs/              disc images to look in (.iso, .bin, .cue, .chd)
+    logs/               what each build printed, written when one ends
     port/               the port source the launcher fetches (created on demand)
     src/main.cpp        the menu
     games/              (release layout) one folder per game, beside the launcher

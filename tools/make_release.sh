@@ -103,8 +103,10 @@ cannot be: what makes them is your own PlayStation 2 disc.
     4. Click it, or press Cross, to play.
 
 Step 3 wants a C++ toolchain and cmake and takes about twenty minutes. If the
-wizard cannot find your disc, put the .iso in the discs/ folder beside this file,
-or insert the disc and press B again.
+wizard cannot find your disc, put the image in the discs/ folder beside this file
+(an .iso, a .bin, a .cue sheet or a .chd all read), or insert the disc and press B
+again. A build can be stopped with Esc and started again, and whatever it printed
+is kept in logs/ beside this file.
 
 Everything the launcher writes stays in this folder, so it can live on a USB stick.
 

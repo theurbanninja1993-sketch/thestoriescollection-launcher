@@ -26,8 +26,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -285,16 +287,39 @@ namespace
 
     std::string portRefOf(const Game &game) { return game.portRef.empty() ? "main" : game.portRef; }
 
+    // A source folder is safe to throw away only if it looks like one. `port_dir`
+    // comes from the config, so it is checked rather than trusted: nothing here
+    // should be able to delete a whole home directory because of a typo in a config.
+    bool safeToWipe(const std::string &dir)
+    {
+        return dir.size() > 1 && dir != "/" && dir != "." && dir != ".." && dir.find("..") == std::string::npos;
+    }
+
     // A shallow clone the first time. After that, take the ref again and reset onto
     // it: the source is not the player's to edit, and this is what makes an update
     // deterministic rather than a merge that can fail next to their changes.
+    //
+    // Both halves have to be able to recover from what an interrupted one leaves
+    // behind. A clone that dies partway leaves a non-empty folder that `git clone`
+    // then refuses, so a player could be left with a card that will not build and a
+    // fetch that cannot fix it - and the only way out was to find and delete the
+    // folder by hand. So: clear whatever is in the way first, and if an existing
+    // checkout can no longer be updated, start it again from scratch.
     std::string fetchCommand(const Game &game)
     {
+        const std::string ref = portRefOf(game);
+        const std::string clone = "git clone --depth 1 --branch \"" + ref + "\" \"" + game.portUrl + "\" \"" +
+                                  game.portDir + "\" 2>&1";
+        const bool wipe = safeToWipe(game.portDir);
         if (game.portLocal.empty())
-            return "git clone --depth 1 --branch \"" + portRefOf(game) + "\" \"" + game.portUrl + "\" \"" +
-                   game.portDir + "\" 2>&1";
-        return "git -C \"" + game.portDir + "\" fetch --depth 1 origin \"" + portRefOf(game) + "\" 2>&1 && "
-               "git -C \"" + game.portDir + "\" reset --hard FETCH_HEAD 2>&1";
+            return (wipe ? "rm -rf \"" + game.portDir + "\" && " : "") + clone;
+
+        const std::string update = "git -C \"" + game.portDir + "\" fetch --depth 1 origin \"" + ref + "\" 2>&1 && "
+                                   "git -C \"" + game.portDir + "\" reset --hard FETCH_HEAD 2>&1";
+        if (!wipe)
+            return update;
+        return update + " || ( echo \"that checkout could not be updated; fetching it again\" && rm -rf \"" +
+               game.portDir + "\" && " + clone + " )";
     }
 
     // What the remote has for the ref, without touching the working tree.
@@ -775,6 +800,15 @@ int main(int argc, char **argv)
     std::vector<int> buildPlan;      // the steps it will take, in order
     int buildPlanAt = 0;             // which of them is running
 
+    // A build that ends - finished, failed or stopped - says so on the way back to
+    // the menu, and says where the whole of what it printed was written. Without
+    // this a failure dropped the player back on a card that still read "not built"
+    // and told them nothing, which is no way to hand someone a twenty-minute build.
+    bool buildReport = false;
+    bool buildReportOk = false;
+    std::string buildReportDetail;
+    std::string buildReportLog;
+
     // Whether a run also cross-compiles Windows. WSL is a Linux machine running on a
     // Windows one, so there the Windows build is the one that is any use; anywhere
     // else it is this machine's own, unless the config says otherwise either way.
@@ -824,16 +858,49 @@ int main(int argc, char **argv)
         buildStop = false;
         buildOk = false;
         buildStarted = GetTime();
+        buildReport = false;
+
+        // Everything a build says, kept. It is the only record of why a build that
+        // failed failed, so it is written before the first step rather than after
+        // something goes wrong - and beside the launcher rather than in the source
+        // folder, so it survives the source folder being deleted or re-fetched.
+        const std::string logPath = base + "/logs/" + games[index].id + "-build.log";
+        std::error_code logEc;
+        std::filesystem::create_directories(std::filesystem::path(logPath).parent_path(), logEc);
+        FILE *log = std::fopen(logPath.c_str(), "w");
+
         std::fprintf(stderr, "[launcher] building %s from %s\n", games[index].id.c_str(), image.c_str());
-        jobThread = std::thread([&, index, image]
+        jobThread = std::thread([&, index, image, log]
         {
+            const auto write = [&](const char *prefix, const std::string &text)
+            {
+                if (log != nullptr)
+                {
+                    std::fprintf(log, "%s%s\n", prefix, text.c_str());
+                    std::fflush(log);
+                }
+            };
+            const auto finish = [&]
+            {
+                if (log != nullptr)
+                    std::fclose(log);
+            };
+
+            write("", "The Stories Collection - build log");
+            write("game:  ", games[index].title);
+            write("from:  ", image);
+            write("", "If the build failed, the last line below is the reason.");
+            write("", "");
+
             const builder::Recipe recipe = builder::readRecipe(games[index].portDir);
             if (!recipe.ok)
             {
+                write("", recipe.error);
                 {
                     std::lock_guard<std::mutex> lock(jobMutex);
                     jobDetail = recipe.error;
                 }
+                finish();
                 jobStatus = -1;
                 jobKind = static_cast<int>(Job::None);
                 return;
@@ -846,12 +913,15 @@ int main(int argc, char **argv)
                 buildStep = step;
                 buildPlanAt = static_cast<int>(std::find(buildPlan.begin(), buildPlan.end(), step) - buildPlan.begin());
                 std::fprintf(stderr, "[build] %s\n", builder::stepName(step));
+                write("", std::string("== ") + builder::stepName(step));
             };
             callbacks.onLine = [&](const std::string &line)
             {
-                // Onto the console as well as the screen: a build that fails needs
-                // something to read afterwards, and the screen is gone by then.
+                // Onto the console and into the log as well as the screen: a build
+                // that fails needs something to read afterwards, and the screen is
+                // gone by then.
                 std::fprintf(stderr, "[build]   %s\n", line.c_str());
+                write("   ", line);
                 std::lock_guard<std::mutex> lock(jobMutex);
                 jobDetail = line;
             };
@@ -859,6 +929,7 @@ int main(int argc, char **argv)
             targets.windows = buildCrosses;
             targets.toolchain = settings.toolchain;
             buildOk = builder::run(games[index].portDir, image, recipe, targets, callbacks);
+            finish();
             jobStatus = buildOk.load() ? 0 : -1;
             jobKind = static_cast<int>(Job::None);
         });
@@ -1109,6 +1180,15 @@ int main(int argc, char **argv)
                     if (!games[index].dataConfigured)
                         games[index].data.clear();
                     derivePaths(games[index]);
+
+                    // Say how it ended, whatever the answer was, and point at the log.
+                    buildReport = true;
+                    buildReportOk = buildOk.load();
+                    {
+                        std::lock_guard<std::mutex> lock(jobMutex);
+                        buildReportDetail = jobDetail;
+                    }
+                    buildReportLog = base + "/logs/" + games[index].id + "-build.log";
                     if (!buildOk.load())
                         std::fprintf(stderr, "[launcher] the build for %s did not finish\n",
                                      games[index].id.c_str());
@@ -1128,6 +1208,81 @@ int main(int argc, char **argv)
                                  games[index].id.c_str(), status);
                 }
             }
+        }
+        // How the build ended, and where to read the rest. A build that failed used
+        // to put the player back on the menu with the card unchanged and nothing
+        // said at all; the reason is the most useful thing the launcher has, so it
+        // goes on the screen and the log beside it is named.
+        if (buildReport)
+        {
+            const float w = static_cast<float>(GetScreenWidth());
+            const float h = static_cast<float>(GetScreenHeight());
+            const float fs = std::max(0.8f, std::min(2.5f, std::min(w / 1280.0f, h / 720.0f)));
+            const auto px = [fs](float v) { return static_cast<int>(std::lround(v * fs)); };
+
+            BeginDrawing();
+            ClearBackground((Color){12, 13, 17, 255});
+
+            const bool stopped = !buildReportOk && buildStop.load();
+            const std::string heading =
+                buildReportOk ? "Build finished" : (stopped ? "Build stopped" : "Build did not finish");
+            drawCenteredLines({heading}, w * 0.5f, h * 0.5f - 170.0f * fs, px(30),
+                              buildReportOk ? (Color){140, 210, 160, 255} : (Color){240, 170, 120, 255}, 38.0f * fs);
+
+            float y = h * 0.5f - 100.0f * fs;
+            if (buildReportOk)
+            {
+                drawCenteredLines(wrapText("The game is ready - the card now says so, and Cross plays it.", px(18),
+                                           w * 0.7f),
+                                  w * 0.5f, y, px(18), (Color){200, 208, 224, 255}, 26.0f * fs);
+            }
+            else
+            {
+                const std::string reason =
+                    buildReportDetail.empty() ? "nothing was reported. The log has everything it printed."
+                                              : buildReportDetail;
+                drawCenteredLines(wrapText("A build carries on from the step it stopped at, so trying again is "
+                                           "cheap - it does not start over.",
+                                           px(18), w * 0.7f),
+                                  w * 0.5f, y, px(18), (Color){200, 208, 224, 255}, 26.0f * fs);
+                y += 74.0f * fs;
+                drawCenteredLines(wrapText(reason, px(18), w * 0.78f), w * 0.5f, y, px(18),
+                                  (Color){240, 170, 120, 255}, 26.0f * fs);
+            }
+
+            if (!buildReportLog.empty())
+            {
+                drawCenteredLines({"the whole build is written to:"}, w * 0.5f, h - 132.0f * fs, px(15),
+                                  (Color){104, 112, 130, 255}, 22.0f * fs);
+                drawCenteredLines(wrapText(buildReportLog, px(15), w * 0.85f), w * 0.5f, h - 106.0f * fs, px(15),
+                                  (Color){126, 134, 152, 255}, 22.0f * fs);
+            }
+
+            // A build that did not finish can be started again from here, which is
+            // the whole point of saying so: the last release left a player with a
+            // build that would not start and no way to find out why.
+            const bool canRetry = !buildReportOk && jobGame >= 0 && jobGame < static_cast<int>(games.size()) &&
+                                  !wizardImage.empty();
+            if (canRetry)
+                drawCenteredLines({usingController ? (pad.bottom + " tries again    -    " + pad.right + " closes this")
+                                                   : "Enter tries again    -    any other key closes"},
+                                  w * 0.5f, h - 54.0f * fs, px(16), (Color){120, 130, 150, 255}, 22.0f * fs);
+            else
+                drawCenteredLines({usingController ? (pad.bottom + " or " + pad.right + " closes this")
+                                                   : "any key closes this"},
+                                  w * 0.5f, h - 54.0f * fs, px(16), (Color){120, 130, 150, 255}, 22.0f * fs);
+            EndDrawing();
+
+            if (canRetry && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE) ||
+                             padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_DOWN)))
+            {
+                buildReport = false;
+                startBuild(jobGame, wizardImage);
+            }
+            else if (GetKeyPressed() != 0 || IsMouseButtonPressed(MOUSE_BUTTON_LEFT) ||
+                     padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_DOWN) || padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
+                buildReport = false;
+            continue;
         }
         if (WindowShouldClose())
             break;

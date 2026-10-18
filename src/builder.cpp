@@ -329,6 +329,9 @@ namespace builder
             sources.push_back({drive, drive + "  (disc drive)", false});
 
         // Disc images, in the place a player would put them and beside the launcher.
+        // Every shape a disc arrives in: a plain .iso, a raw .bin, a .cue sheet that
+        // names one of those, or a .chd - which is what a lot of people keep their
+        // library in, and what the port reads directly now.
         const std::vector<fs::path> where = {fs::path(configDir) / "discs", fs::path(configDir)};
         for (const fs::path &folder : where)
         {
@@ -337,9 +340,10 @@ namespace builder
             std::vector<fs::path> images;
             for (const fs::directory_entry &entry : fs::directory_iterator(folder, ec))
             {
-                const std::string ext = entry.path().extension().string();
-                if (entry.is_regular_file()
-                    && (ext == ".iso" || ext == ".ISO" || ext == ".bin" || ext == ".BIN"))
+                std::string ext = entry.path().extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (entry.is_regular_file() && (ext == ".iso" || ext == ".bin" || ext == ".cue" || ext == ".chd"))
                     images.push_back(entry.path());
             }
             std::sort(images.begin(), images.end());
@@ -603,17 +607,40 @@ namespace builder
         auto shell = [&](const std::vector<std::string> &argv, const std::string &cwd) -> int
         { return runTool(argv, cwd, {}, cb.onLine, pid); };
 
+        // Every step that can fail says what failed. This line is what the player
+        // ends up reading on the build-ended screen, and "nothing was reported"
+        // is a poor thing to leave them with - a missing cmake was the worst case,
+        // where the child never even started and so printed nothing at all.
+        auto failed = [&](const std::string &what, int status) -> bool
+        {
+            if (cb.onLine)
+            {
+                std::string line = what + " failed";
+                if (status == 127)
+                    line += " - the program is not installed, or not on PATH";
+                else if (status > 0)
+                    line += " (exit " + std::to_string(status) + ")";
+                line += ". Everything it printed is in the log.";
+                cb.onLine(line);
+            }
+            return false;
+        };
+
         // ---------------------------------------------------------------- tools
         if (!step(StepTools))
             return false;
         fs::create_directories(buildDir, ec);
-        if (shell({"cmake", "-S", portDir, "-B", buildDir, "-DCMAKE_BUILD_TYPE=Release"}, "") != 0)
-            return false;
+        {
+            const int status = shell({"cmake", "-S", portDir, "-B", buildDir, "-DCMAKE_BUILD_TYPE=Release"}, "");
+            if (status != 0)
+                return failed(status == 127 ? "cmake" : "configuring the build", status);
+        }
         {
             std::vector<std::string> argv = {"cmake", "--build", buildDir, "--target",
                                              "ps2_recomp", "ps2x_iso", "vu1_recomp", "-j", std::to_string(cores())};
-            if (shell(argv, "") != 0)
-                return false;
+            const int status = shell(argv, "");
+            if (status != 0)
+                return failed("building the tools", status);
         }
         for (const std::string &tool : {ps2Recomp, ps2Iso, vu1Recomp})
             if (!need(tool))
@@ -670,13 +697,16 @@ namespace builder
                 if ((!fs::exists(archive, ec) && shell({"curl", "-fL", "--retry", "3", "-o", archive, url}, "") != 0))
                 {
                     if (cb.onLine)
-                        cb.onLine("could not download the cross-compiler");
+                        cb.onLine("could not download the cross-compiler - check the connection, then try again");
                     return false;
                 }
                 if (cb.onLine)
                     cb.onLine("unpacking the cross-compiler, which takes a moment");
-                if (shell({"tar", "-xJf", archive, "-C", toolchains}, "") != 0)
-                    return false;
+                {
+                    const int status = shell({"tar", "-xJf", archive, "-C", toolchains}, "");
+                    if (status != 0)
+                        return failed("unpacking the cross-compiler", status);
+                }
                 toolchainRoot = join(toolchains, asset);
                 if (!works(toolchainRoot))
                 {
@@ -690,11 +720,14 @@ namespace builder
 
             // Configured here rather than at the end because it takes minutes and
             // nothing about it depends on the game having been compiled.
-            if (shell({"cmake", "-S", portDir, "-B", buildWin, "-DCMAKE_BUILD_TYPE=Release",
-                       "-DCMAKE_TOOLCHAIN_FILE=" + join(portDir, "cmake/toolchains/llvm-mingw-x86_64.cmake"),
-                       "-DLLVM_MINGW_ROOT=" + toolchainRoot},
-                      "") != 0)
-                return false;
+            {
+                const int status = shell({"cmake", "-S", portDir, "-B", buildWin, "-DCMAKE_BUILD_TYPE=Release",
+                                          "-DCMAKE_TOOLCHAIN_FILE=" + join(portDir, "cmake/toolchains/llvm-mingw-x86_64.cmake"),
+                                          "-DLLVM_MINGW_ROOT=" + toolchainRoot},
+                                         "");
+                if (status != 0)
+                    return failed("configuring the Windows build", status);
+            }
         }
 
         // ---------------------------------------------------------------- check
@@ -717,12 +750,13 @@ namespace builder
             status = runCapturing({ps2Iso, "check", image}, "", cb.onLine, pid, output);
         }
         if (status != 0)
-            return false;
+            return failed("reading the disc", status);
         const std::string hash = parseHash(output);
         if (hash != recipe.bootHash)
         {
             if (cb.onLine)
-                cb.onLine("this disc is not the one this source is for");
+                cb.onLine("this disc is not the one this source is for: its boot file hashes to " + hash +
+                          ", and this source expects " + recipe.bootHash);
             return false;
         }
 
@@ -733,8 +767,11 @@ namespace builder
         {
             fs::remove_all(discDir, ec);
             fs::create_directories(discDir, ec);
-            if (shell({ps2Iso, "extract", image, discDir}, "") != 0)
-                return false;
+            {
+                const int status = shell({ps2Iso, "extract", image, discDir}, "");
+                if (status != 0)
+                    return failed("extracting the disc", status);
+            }
         }
 
         // ------------------------------------------------------------ recompile
@@ -757,8 +794,11 @@ namespace builder
             }
             fs::remove_all(generated, ec);
             fs::create_directories(generated, ec);
-            if (shell({ps2Recomp, workConfig}, portDir) != 0)
-                return false;
+            {
+                const int status = shell({ps2Recomp, workConfig}, portDir);
+                if (status != 0)
+                    return failed("the recompiler", status);
+            }
             size_t files = 0;
             for (const fs::directory_entry &entry : fs::directory_iterator(generated, ec))
                 if (entry.is_regular_file() && entry.path().extension() == ".cpp")
@@ -790,14 +830,20 @@ namespace builder
         {
             std::vector<std::string> configure = {"cmake", "-S", portDir, "-B", buildDir, "-DCMAKE_BUILD_TYPE=Release",
                                                   "-DPS2X_VU1_PROGRAMS=" + vu1Dir};
-            if (shell(configure, "") != 0)
-                return false;
+            {
+                const int status = shell(configure, "");
+                if (status != 0)
+                    return failed("configuring the port", status);
+            }
             std::vector<std::string> build = {"cmake", "--build", buildDir, "--target", "ps2EntryRunner", "-j",
                                               std::to_string(cores())};
             if (interrupted)
                 build.push_back("--clean-first");
-            if (shell(build, "") != 0)
-                return false;
+            {
+                const int status = shell(build, "");
+                if (status != 0)
+                    return failed("compiling the port", status);
+            }
         }
 
         // ------------------------------------------------------------------ vu1
@@ -854,8 +900,11 @@ namespace builder
 
             std::vector<std::string> recompiler = {vu1Recomp, vu1Dir};
             recompiler.insert(recompiler.end(), captures.begin(), captures.end());
-            if (shell(recompiler, "") != 0)
-                return false;
+            {
+                const int status = shell(recompiler, "");
+                if (status != 0)
+                    return failed("the VU1 compiler", status);
+            }
             if (!fs::exists(join(vu1Dir, "vu1_programs.cpp"), ec))
             {
                 if (cb.onLine)
@@ -887,14 +936,20 @@ namespace builder
             // the registry existed when it last configured.
             std::vector<std::string> configure = {"cmake", "-S", portDir, "-B", buildDir, "-DCMAKE_BUILD_TYPE=Release",
                                                   "-DPS2X_VU1_PROGRAMS=" + vu1Dir};
-            if (shell(configure, "") != 0)
-                return false;
+            {
+                const int status = shell(configure, "");
+                if (status != 0)
+                    return failed("configuring the port with the microprograms", status);
+            }
             std::vector<std::string> rebuild = {"cmake", "--build", buildDir, "--target", "ps2EntryRunner", "-j",
                                                 std::to_string(cores())};
             if (interrupted)
                 rebuild.push_back("--clean-first");
-            if (shell(rebuild, "") != 0)
-                return false;
+            {
+                const int status = shell(rebuild, "");
+                if (status != 0)
+                    return failed("compiling the port with the microprograms", status);
+            }
         }
 
         // -------------------------------------------------------------- windows
@@ -907,14 +962,21 @@ namespace builder
             // before them. That is not tidiness: a Windows link without the VU1
             // programs on the link line resolves raylib's CloseWindow and ShowCursor
             // against USER32's copies and stops with duplicate symbols.
-            if (shell({"cmake", "-S", portDir, "-B", buildWin, "-DCMAKE_BUILD_TYPE=Release",
-                       "-DCMAKE_TOOLCHAIN_FILE=" + join(portDir, "cmake/toolchains/llvm-mingw-x86_64.cmake"),
-                       "-DLLVM_MINGW_ROOT=" + toolchainRoot, "-DPS2X_VU1_PROGRAMS=" + vu1Dir},
-                      "") != 0)
-                return false;
-            if (shell({"cmake", "--build", buildWin, "--target", "ps2EntryRunner", "-j", std::to_string(cores())},
-                      "") != 0)
-                return false;
+            {
+                const int status = shell({"cmake", "-S", portDir, "-B", buildWin, "-DCMAKE_BUILD_TYPE=Release",
+                                          "-DCMAKE_TOOLCHAIN_FILE=" + join(portDir, "cmake/toolchains/llvm-mingw-x86_64.cmake"),
+                                          "-DLLVM_MINGW_ROOT=" + toolchainRoot, "-DPS2X_VU1_PROGRAMS=" + vu1Dir},
+                                         "");
+                if (status != 0)
+                    return failed("configuring the Windows build", status);
+            }
+            {
+                const int status = shell({"cmake", "--build", buildWin, "--target", "ps2EntryRunner", "-j",
+                                          std::to_string(cores())},
+                                         "");
+                if (status != 0)
+                    return failed("cross-compiling for Windows", status);
+            }
 
             // Then gather everything a Windows machine needs into one folder, because
             // the runner looks for the game's files beside itself. This copy is why

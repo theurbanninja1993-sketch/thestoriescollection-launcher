@@ -1386,6 +1386,7 @@ int main(int argc, char **argv)
     bool notice = false;
     bool noticeBusy = false; // something is being waited for; say so, and keep drawing
     float noticeOpenedAt = 0.0f;
+    int noticeScroll = 0;    // which line of a long report is at the top
     std::string noticeTitle;
     std::string noticeText;
     // A notice can offer to put something right rather than only describe it. Both of
@@ -1490,6 +1491,7 @@ int main(int argc, char **argv)
         noticeOffer = offer;
         noticeBusy = busy;
         noticeOpenedAt = GetTime();
+        noticeScroll = 0;
         notice = true;
     };
 
@@ -2502,8 +2504,26 @@ int main(int argc, char **argv)
             ClearBackground((Color){12, 13, 17, 255});
             drawCenteredLines({noticeTitle}, w * 0.5f, h * 0.5f - 130.0f * fs, px(28),
                               (Color){240, 200, 120, 255}, 36.0f * fs);
-            drawCenteredLines(wrapLines(noticeText, px(18), w * 0.74f), w * 0.5f, h * 0.5f - 60.0f * fs, px(18),
-                              (Color){200, 208, 224, 255}, 26.0f * fs);
+            // Bounded, because a report can be longer than the screen: it stops clear of
+            // the prompts below and scrolls, rather than running over the line that says
+            // what to press. That line is the one thing on this screen that must not be
+            // covered.
+            const std::vector<std::string> body = wrapLines(noticeText, px(18), w * 0.74f);
+            const float bodyTop = h * 0.5f - 60.0f * fs;
+            const float bodyBottom = h - (noticeBusy ? 96.0f : 122.0f) * fs;
+            const float lineHeight = 26.0f * fs;
+            const int fits = std::max(1, static_cast<int>((bodyBottom - bodyTop) / lineHeight));
+            const int maxScroll = std::max(0, static_cast<int>(body.size()) - fits);
+            noticeScroll = std::max(0, std::min(noticeScroll, maxScroll));
+            drawCenteredLines(std::vector<std::string>(body.begin() + noticeScroll,
+                                                       body.begin() + std::min(body.size(),
+                                                                               static_cast<size_t>(noticeScroll + fits))),
+                              w * 0.5f, bodyTop, px(18), (Color){200, 208, 224, 255}, lineHeight);
+            if (maxScroll > 0)
+                drawCenteredLines({std::to_string(noticeScroll + 1) + "-" +
+                                   std::to_string(std::min<int>(static_cast<int>(body.size()), noticeScroll + fits)) +
+                                   " of " + std::to_string(body.size()) + "   -   up and down, or the wheel, to read the rest"},
+                                  w * 0.5f, bodyBottom + 6.0f * fs, px(15), (Color){150, 158, 176, 255}, 20.0f * fs);
             if (noticeBusy)
             {
                 // Moving dots, because a still screen is what a crash looks like.
@@ -2513,7 +2533,7 @@ int main(int argc, char **argv)
             }
             else
             {
-                drawCenteredLines({usingController ? (pad.bottom + " closes this") : "any key closes this"},
+                drawCenteredLines({usingController ? (pad.bottom + " closes this") : "any other key closes this"},
                                   w * 0.5f, h - 54.0f * fs, px(16), (Color){120, 130, 150, 255}, 22.0f * fs);
                 if (noticeOffer != Offer::None)
                     drawCenteredLines({"W  -  let the launcher do it"}, w * 0.5f, h - 86.0f * fs, px(18),
@@ -2569,10 +2589,21 @@ int main(int argc, char **argv)
             // Not within a quarter of a second of opening: the key that asked for this
             // screen is still in the queue, and a notice dismissed by the press that
             // opened it is another way of looking like nothing happened.
+            const int pressed = GetKeyPressed(); // consumes one key: read it once
+            const bool scrollKey = pressed == KEY_UP || pressed == KEY_DOWN || pressed == KEY_PAGE_UP ||
+                                   pressed == KEY_PAGE_DOWN;
+            if (scrollKey)
+                noticeScroll += pressed == KEY_UP || pressed == KEY_PAGE_UP ? -1 : 1;
+            noticeScroll += static_cast<int>(GetMouseWheelMove() * -3.0f);
+            if (padPressedAny(GAMEPAD_BUTTON_LEFT_FACE_DOWN))
+                noticeScroll += 1;
+            if (padPressedAny(GAMEPAD_BUTTON_LEFT_FACE_UP))
+                noticeScroll -= 1;
+
             const bool settled = GetTime() - noticeOpenedAt > 0.25f;
-            if (settled && (GetKeyPressed() != 0 || IsMouseButtonPressed(MOUSE_BUTTON_LEFT) ||
-                            padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_DOWN) ||
-                            padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_RIGHT)))
+            if (settled && !scrollKey && (pressed != 0 || IsMouseButtonPressed(MOUSE_BUTTON_LEFT) ||
+                                          padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_DOWN) ||
+                                          padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_RIGHT)))
             {
                 notice = false;
                 noticeBusy = false;

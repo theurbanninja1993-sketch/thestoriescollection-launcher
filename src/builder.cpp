@@ -656,6 +656,46 @@ namespace builder
             if (!need(tool))
                 return false;
 
+        // ---------------------------------------------------------------- check
+        // Before the toolchain and the Windows configure, which take minutes: this only
+        // needs ps2x_iso, which the tools step has just built, and a wrong disc is the
+        // one failure that needs nothing else.
+        if (!step(StepCheck))
+            return false;
+        std::string output;
+        int status = 0;
+        if (imageIsFolder)
+        {
+            if (!fs::exists(bootPath, ec))
+            {
+                if (cb.onLine)
+                    cb.onLine("no " + recipe.bootFile + " in " + image);
+                return false;
+            }
+            status = runCapturing({ps2Iso, "hashfile", bootPath}, "", cb.onLine, pid, output);
+        }
+        else
+        {
+            status = runCapturing({ps2Iso, "check", image, "--boot", recipe.bootFile}, "", cb.onLine, pid, output);
+        }
+        if (status != 0)
+            return failed("reading the disc", status);
+        const std::string hash = parseHash(output);
+        if (hash.empty())
+        {
+            if (cb.onLine)
+                cb.onLine("could not read this disc. The reason is in the lines above; the whole check is in the log.");
+            return false;
+        }
+        if (hash != recipe.bootHash)
+        {
+            if (cb.onLine)
+                cb.onLine("this is a PlayStation 2 disc, but not the one this source was built for: its boot file (" +
+                          recipe.bootFile + ") hashes to " + hash + ", and this source expects " + recipe.bootHash +
+                          ". A different region, a different pressing, or an image a tool has edited will do this.");
+            return false;
+        }
+
         // ------------------------------------------------------------ toolchain
         // A Windows build needs a compiler that runs here and targets there, and one
         // is fetched once into the source and reused. Anything already on this machine
@@ -738,43 +778,6 @@ namespace builder
                 if (status != 0)
                     return failed("configuring the Windows build", status);
             }
-        }
-
-        // ---------------------------------------------------------------- check
-        if (!step(StepCheck))
-            return false;
-        std::string output;
-        int status = 0;
-        if (imageIsFolder)
-        {
-            if (!fs::exists(bootPath, ec))
-            {
-                if (cb.onLine)
-                    cb.onLine("no " + recipe.bootFile + " in " + image);
-                return false;
-            }
-            status = runCapturing({ps2Iso, "hashfile", bootPath}, "", cb.onLine, pid, output);
-        }
-        else
-        {
-            status = runCapturing({ps2Iso, "check", image, "--boot", recipe.bootFile}, "", cb.onLine, pid, output);
-        }
-        if (status != 0)
-            return failed("reading the disc", status);
-        const std::string hash = parseHash(output);
-        if (hash.empty())
-        {
-            if (cb.onLine)
-                cb.onLine("could not read this disc. The reason is in the lines above; the whole check is in the log.");
-            return false;
-        }
-        if (hash != recipe.bootHash)
-        {
-            if (cb.onLine)
-                cb.onLine("this is a PlayStation 2 disc, but not the one this source was built for: its boot file (" +
-                          recipe.bootFile + ") hashes to " + hash + ", and this source expects " + recipe.bootHash +
-                          ". A different region, a different pressing, or an image a tool has edited will do this.");
-            return false;
         }
 
         // -------------------------------------------------------------- extract

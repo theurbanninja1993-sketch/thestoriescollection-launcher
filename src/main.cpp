@@ -1397,6 +1397,7 @@ int main(int argc, char **argv)
     {
         if (which == Offer::InstallWsl)
             return "@echo off\r\n"
+                   "title Installing WSL\r\n"
                    "rem WSL is the Linux inside Windows that builds the port. It is a free\r\n"
                    "rem optional Windows feature; nothing else on this PC is touched.\r\n"
                    "echo Installing WSL. Windows will ask for permission first.\r\n"
@@ -1409,6 +1410,7 @@ int main(int argc, char **argv)
                    "pause\r\n";
         if (which == Offer::InstallToolchain)
             return "@echo off\r\n"
+                   "title Installing the C++ toolchain inside WSL\r\n"
                    "rem The compiler the port is built with, inside WSL. It runs as root\r\n"
                    "rem inside WSL, which is a place this launcher already owns - so it needs\r\n"
                    "rem no password and cannot reach anything outside WSL.\r\n"
@@ -2330,11 +2332,18 @@ int main(int argc, char **argv)
                 out.close();
                 const bool started = written && platform::runInWindow(script, which == Offer::InstallWsl);
                 std::fprintf(stderr, "[launcher] %s %s\n", started ? "offered" : "could not run", script.c_str());
+                // Out of the way, and not merely polite: this install reports its own
+                // progress, and a full screen launcher in front of the window is exactly
+                // why none of it could be seen. A bar drawn here would be a guess - the
+                // installer does not report a percentage - so the real one wins.
+                if (started)
+                    MinimizeWindow();
                 noticeTitle = started ? "Running that for you" : "Could not run that";
                 noticeText = started
-                                 ? ("A window has opened with it, and it stays open when it finishes. "
-                                    "Windows may ask for permission first.\n\nWhen it is done, press B here "
-                                    "again - the launcher works the rest out from what is there.")
+                                 ? ("The launcher has got out of the way. Look for the window it opened - "
+                                    "Windows may ask for permission first, and the window has the progress in "
+                                    "it, and stays open when it finishes.\n\nWhen it is done, come back here "
+                                    "and press B - the launcher works the rest out from what is there.")
                                  : ("The launcher could not start it. What it would have run is written to:\n\n" +
                                     script);
                 notice = true;

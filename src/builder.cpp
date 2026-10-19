@@ -894,34 +894,59 @@ namespace builder
             if (cb.onLine)
                 cb.onLine("pass " + std::to_string(pass) + " of " + std::to_string(recipe.learnPasses));
 
-            std::vector<std::string> environment = {"PS2X_HIDDEN_WINDOW=1", "PS2X_NO_LAUNCH_MENU=1",
-                                                    "PS2X_VU1_LEARN=" + learn,
-                                                    "PS2X_PAD_SCRIPT=" + recipe.learnPadScript};
-            if (!recipe.learnFrames.empty())
-                environment.push_back("PS2X_EXIT_AFTER_FRAME=" + recipe.learnFrames);
-            // The first pass must start from nothing, or it would only record what is
-            // already compiled and never find the rest.
-            if (pass == 1)
-                environment.push_back("PS2X_VU1_NO_COMPILED=1");
+            // The pass runs the game for its recordings, with its window hidden so it stays
+            // off the desktop. Some graphics stacks refuse a hidden window (GLXBadFBConfig
+            // under WSL), and then nothing is recorded, so a pass that records nothing is run
+            // once more with a visible window before the build gives up.
+            auto learnPass = [&](bool hidden) -> int
+            {
+                std::vector<std::string> environment = {"PS2X_NO_LAUNCH_MENU=1",
+                                                        "PS2X_VU1_LEARN=" + learn,
+                                                        "PS2X_PAD_SCRIPT=" + recipe.learnPadScript};
+                if (hidden)
+                    environment.insert(environment.begin(), "PS2X_HIDDEN_WINDOW=1");
+                if (!recipe.learnFrames.empty())
+                    environment.push_back("PS2X_EXIT_AFTER_FRAME=" + recipe.learnFrames);
+                // The first pass must start from nothing, or it would only record what is
+                // already compiled and never find the rest.
+                if (pass == 1)
+                    environment.push_back("PS2X_VU1_NO_COMPILED=1");
 
-            // The pass exits on the manifest's frame count; the timeout is only there
-            // in case a game never reaches it.
-            std::vector<std::string> learner = {runner, bootPath};
-            if (fs::exists("/usr/bin/timeout", ec))
-                learner = {"/usr/bin/timeout", "400", runner, bootPath};
-            const int status = runTool(learner, learn, environment, cb.onLine, pid);
-            if (status != 0 && cb.onLine)
+                // The pass exits on the manifest's frame count; the timeout is only there
+                // in case a game never reaches it.
+                std::vector<std::string> learner = {runner, bootPath};
+                if (fs::exists("/usr/bin/timeout", ec))
+                    learner = {"/usr/bin/timeout", "400", runner, bootPath};
+                return runTool(learner, learn, environment, cb.onLine, pid);
+            };
+            auto collectCaptures = [&]()
+            {
+                std::vector<std::string> found;
+                for (const fs::directory_entry &entry : fs::directory_iterator(learn, ec))
+                {
+                    const std::string name = entry.path().filename().string();
+                    if (entry.is_regular_file() && name.rfind("vu1_learn_", 0) == 0 && entry.path().extension() == ".bin")
+                        found.push_back(entry.path().string());
+                }
+                return found;
+            };
+
+            int learnStatus = learnPass(true);
+            if (learnStatus != 0 && cb.onLine)
                 cb.onLine("that pass ended early; that is fine if it recorded something");
+            std::vector<std::string> captures = collectCaptures();
+            if (captures.empty())
+            {
+                if (cb.onLine)
+                    cb.onLine("the pass recorded nothing with a hidden window; running it once more with a visible one");
+                learnStatus = learnPass(false);
+                if (learnStatus != 0 && cb.onLine)
+                    cb.onLine("that visible pass ended early too");
+                captures = collectCaptures();
+            }
 
             fs::remove_all(vu1Dir, ec);
             fs::create_directories(vu1Dir, ec);
-            std::vector<std::string> captures;
-            for (const fs::directory_entry &entry : fs::directory_iterator(learn, ec))
-            {
-                const std::string name = entry.path().filename().string();
-                if (entry.is_regular_file() && name.rfind("vu1_learn_", 0) == 0 && entry.path().extension() == ".bin")
-                    captures.push_back(entry.path().string());
-            }
             if (captures.empty())
             {
                 if (cb.onLine)

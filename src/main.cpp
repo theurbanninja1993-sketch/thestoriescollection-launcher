@@ -1469,7 +1469,7 @@ int main(int argc, char **argv)
     // draws the menu is a window that stops answering - which is indistinguishable from
     // a crash, and was reported as one. So it is asked in the background, the notice
     // says it is being asked, and the answer is remembered so it is asked once.
-    enum class Wsl { Unknown, Asking, Ready, NoWsl, NoLauncher, NoRun, NoToolchain, NoBuildTools };
+    enum class Wsl { Unknown, Asking, Ready, NoWsl, NoLauncher, NoRun, NoToolchain };
 
     // The question and the answer together, in something that joins its own thread
     // however main leaves: a thread that is joinable and never joined is a terminate().
@@ -1562,12 +1562,6 @@ int main(int argc, char **argv)
             const bool runs = usable && launcher && probe(runsCommand);
             const bool cmake = usable && probe("wsl.exe -u root -e cmake --version");
             const bool compiler = usable && probe("wsl.exe -u root -e g++ --version");
-            // The headers a build needs and a runtime library does not provide. This is
-            // the failure that stopped the first real build: the port's configure pulls
-            // in raylib, whose GLFW wants X11's headers, and having the X11 *library* is
-            // not the same as having the X11 *development* package.
-            const bool headers = usable && probe("wsl.exe -u root -e test -f /usr/include/X11/Xlib.h") &&
-                                 probe("wsl.exe -u root -e test -f /usr/include/GL/gl.h");
             // What Windows says when the feature is enabled but has not taken effect yet.
             // That is the most likely reason for a "no" straight after an install, and
             // the one thing a player can put right in a minute.
@@ -1587,8 +1581,7 @@ int main(int argc, char **argv)
                                         : !launcher           ? Wsl::NoLauncher
                                         : !runs               ? Wsl::NoRun
                                         : !(cmake && compiler) ? Wsl::NoToolchain
-                                        : !headers            ? Wsl::NoBuildTools
-                                                              : Wsl::Ready);
+                                                               : Wsl::Ready);
         });
     };
 
@@ -1635,12 +1628,8 @@ int main(int argc, char **argv)
             break;
         case Wsl::NoRun:
         case Wsl::NoToolchain:
-        case Wsl::NoBuildTools:
-            setNotice(wsl.state.load() == static_cast<int>(Wsl::NoRun)
-                          ? "The Linux launcher will not start"
-                          : wsl.state.load() == static_cast<int>(Wsl::NoBuildTools)
-                                ? "WSL is missing what a build needs"
-                                : "WSL needs a compiler",
+            setNotice(wsl.state.load() == static_cast<int>(Wsl::NoRun) ? "The Linux launcher will not start"
+                                                                       : "WSL needs a compiler",
                       std::string("WSL is there, but something it needs is not. The message below is what it "
                                   "said, kept where it can be read.\n\nPress W and the launcher will install "
                                   "cmake, a C++ toolchain, the headers a build needs and the libraries a window "
@@ -2240,6 +2229,32 @@ int main(int argc, char **argv)
                         buildReportDetail = jobDetail;
                     }
                     buildReportLog = base + "/logs/" + games[index].id + "-build.log";
+                      // What the build said, read back. A missing header or library is the
+                      // one failure the launcher can put right, and the log is the only
+                      // witness that cannot be wrong about it. Offering this *after* a
+                      // failure rather than before a build is the difference between a
+                      // check and a gate: the gate cost a player a working build and told
+                      // him his machine was missing things it had.
+                      if (!buildOk.load())
+                      {
+                          std::ifstream buildLog(buildReportLog, std::ios::binary);
+                          std::ostringstream whole;
+                          whole << buildLog.rdbuf();
+                          const std::string said = whole.str();
+                          if (said.find("Could NOT find") != std::string::npos ||
+                              said.find("missing:") != std::string::npos ||
+                              said.find("cannot find -l") != std::string::npos)
+                          {
+                              buildReport = false;
+                              setNotice("The build is missing something to build with",
+                                        "It stopped at a missing header or library - the kind of thing that is "
+                                        "installed rather than downloaded.\n\nPress W and the launcher will "
+                                        "install everything a build needs, inside WSL. It needs no password: it "
+                                        "runs as root there, which is a place you already own.\n\nWhat the "
+                                        "build said is in:\n\n" + buildReportLog,
+                                        Offer::InstallToolchain, false);
+                          }
+                      }
                     if (!buildOk.load())
                         std::fprintf(stderr, "[launcher] the build for %s did not finish\n",
                                      games[index].id.c_str());

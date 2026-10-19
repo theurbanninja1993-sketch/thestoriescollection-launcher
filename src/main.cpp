@@ -1516,9 +1516,17 @@ int main(int argc, char **argv)
             };
 
             wsl.report.clear();
+            wsl.report += std::string("  launcher folder: ") + directory + "\n";
             wsl.report += std::string("  wsl.exe found: ") + (platform::wslAvailable() ? "yes" : "no") + "\n";
+            // The Linux form of the path, because --cd taking a Windows path is
+            // documented but is not something to bet a player's evening on.
+            const std::string wslDirectory = platform::toWslPath(directory);
+            // And the execute bit, which a file unpacked on Windows does not have. Set
+            // as root so it cannot fail on ownership, and its answer ignored: whether it
+            // worked is not the question, whether the launcher then runs is.
+            probe("wsl.exe -u root -e chmod +x " + wslDirectory + "/ps2x_launcher");
             const std::string runsCommand =
-                "wsl.exe --cd \"" + directory + "\" ./ps2x_launcher --version";
+                "wsl.exe --cd " + wslDirectory + " ./ps2x_launcher --version";
             // uname answers "is there a Linux behind wsl.exe"; cmake and g++ are asked
             // directly rather than read out of a package list, because what matters is
             // whether a build can run, not how it got there.
@@ -1575,8 +1583,8 @@ int main(int argc, char **argv)
             if (out)
                 out << wsl.report;
         }
-        const std::string command =
-            "wsl --cd \"" + directory + "\" ./ps2x_launcher --build " + std::to_string(selected);
+        const std::string command = "wsl --cd " + platform::toWslPath(directory) +
+                                    " ./ps2x_launcher --build " + std::to_string(selected);
         switch (static_cast<Wsl>(wsl.state.load()))
         {
         case Wsl::NoWsl:
@@ -1591,7 +1599,8 @@ int main(int argc, char **argv)
                                  "which means a restart. That is the most likely reason straight after an "
                                  "install, and the whole of the fix."
                                : "") +
-                          "\n\nWhat the launcher asked, and what Windows said:\n\n" + wsl.report,
+                          "\n\nWhat the launcher asked, and what Windows said:\n\n" + wsl.report +
+                              "\nThe same thing is kept in:\n\n" + base + "\\logs\\wsl.txt",
                       Offer::InstallWsl, false);
             break;
         case Wsl::NoLauncher:
@@ -1616,7 +1625,8 @@ int main(int argc, char **argv)
                                  "Windows 10 with the WSLg update, and until then the build window cannot be "
                                  "shown here."
                                : "") +
-                          "\n\nWhat the launcher asked, and what WSL said:\n\n" + wsl.report,
+                          "\n\nWhat the launcher asked, and what WSL said:\n\n" + wsl.report +
+                              "\nThe same thing is kept in:\n\n" + base + "\\logs\\wsl.txt",
                       Offer::InstallToolchain, false);
             break;
         default:
@@ -1638,7 +1648,9 @@ int main(int argc, char **argv)
             // Through a script rather than straight at wsl.exe: a window that opens for a
             // second and closes takes its reason with it, and that is precisely what
             // happened. On failure the script says so and waits.
-            std::string command = "wsl --cd \"" + directory + "\" ./ps2x_launcher --build " +
+            const std::string wslDirectory = platform::toWslPath(directory);
+            std::string command = "wsl -u root -e chmod +x " + wslDirectory + "/ps2x_launcher\r\n"
+                                  "wsl --cd " + wslDirectory + " ./ps2x_launcher --build " +
                                   std::to_string(selected);
             if (!games[selected].disc.empty())
                 command += " --image \"" + platform::toWslPath(games[selected].disc) + "\"";

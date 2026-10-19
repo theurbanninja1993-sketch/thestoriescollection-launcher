@@ -1444,6 +1444,8 @@ int main(int argc, char **argv)
     struct WslAsker
     {
         std::atomic<int> state{static_cast<int>(Wsl::Unknown)};
+        std::string report;      // what was asked, and what came back
+        bool needsRestart = false;
         std::thread thread;
         ~WslAsker()
         {
@@ -1466,16 +1468,61 @@ int main(int argc, char **argv)
         wsl.state = static_cast<int>(Wsl::Asking);
         wsl.thread = std::thread([&]
         {
+            // Every answer is kept as what was run and what came back, not only as a
+            // verdict. The launcher has now told someone the wrong thing about their own
+            // machine twice, and both times the fix came from reading the output rather
+            // than from reasoning about it. The report is written before the state and
+            // read after it, so the atomic is what orders them.
+            //
+            // WSL prints UTF-16, so a captured line is every other byte a NUL. Made
+            // readable, because this text is the whole point of the report.
+            const auto plainText = [](const std::string &text)
+            {
+                const bool wide = text.size() >= 2 && text[1] == '\0';
+                std::string out;
+                for (size_t i = 0; i < text.size(); i += wide ? 2 : 1)
+                    if (text[i] != '\0' && static_cast<unsigned char>(text[i]) >= 32)
+                        out += text[i];
+                return out;
+            };
+            const auto probe = [&](const std::string &command)
+            {
+                std::vector<std::string> lines;
+                const int status = runCapturedAll(command, lines);
+                std::string said = lines.empty() ? std::string("no output") : plainText(lines.front());
+                if (said.size() > 160)
+                    said.resize(160);
+                wsl.report += "  " + command + "\n    exit " + std::to_string(status) + ": " + said + "\n";
+                return status == 0;
+            };
+
+            wsl.report.clear();
+            wsl.report += std::string("  wsl.exe found: ") + (platform::wslAvailable() ? "yes" : "no") + "\n";
             // uname answers "is there a Linux behind wsl.exe"; cmake and g++ are asked
             // directly rather than read out of a package list, because what matters is
             // whether a build can run, not how it got there.
-            const bool usable = platform::wslUsable();
+            const bool usable = platform::wslAvailable() && probe("wsl.exe -e uname");
             const bool launcher = platform::fileIsExecutable(directory + "/ps2x_launcher");
-            const bool toolchain = usable && platform::wslHasToolchain();
-            wsl.state = static_cast<int>(!usable      ? Wsl::NoWsl
-                                        : !launcher   ? Wsl::NoLauncher
-                                        : !toolchain  ? Wsl::NoToolchain
-                                                      : Wsl::Ready);
+            const bool cmake = usable && probe("wsl.exe -e cmake --version");
+            const bool compiler = usable && probe("wsl.exe -e g++ --version");
+            // What Windows says when the feature is enabled but has not taken effect yet.
+            // That is the most likely reason for a "no" straight after an install, and
+            // the one thing a player can put right in a minute.
+            const std::string lower = [&]
+            {
+                std::string s = wsl.report;
+                for (char &c : s)
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                return s;
+            }();
+            wsl.needsRestart = lower.find("restart") != std::string::npos ||
+                               lower.find("virtual machine platform") != std::string::npos ||
+                               lower.find("not enabled") != std::string::npos ||
+                               lower.find("no installed distributions") != std::string::npos;
+            wsl.state = static_cast<int>(!usable              ? Wsl::NoWsl
+                                        : !launcher           ? Wsl::NoLauncher
+                                        : !(cmake && compiler) ? Wsl::NoToolchain
+                                                               : Wsl::Ready);
         });
     };
 
@@ -1489,13 +1536,17 @@ int main(int argc, char **argv)
         {
         case Wsl::NoWsl:
             setNotice("WSL is not set up yet",
-                      "WSL is what lets this launcher build. It is Linux inside Windows, the port is built by "
-                      "Linux, and WSL is a free optional Windows feature - not part of Windows by default, but "
-                      "one command and one restart to add.\n\nPress W and the launcher will install it for "
-                      "you. Windows will ask for permission first, and will say if a restart is needed.\n\n"
-                      "If you have already installed it, a restart is what is usually missing: WSL cannot "
-                      "answer until Windows has been restarted, and this message is what not answering looks "
-                      "like.",
+                      std::string("WSL is what lets this launcher build. It is Linux inside Windows, the port "
+                                  "is built by Linux, and WSL is a free optional Windows feature - not part of "
+                                  "Windows by default, but one command and one restart to add.\n\nPress W and "
+                                  "the launcher will install it for you. Windows will ask for permission first, "
+                                  "and will say if a restart is needed.") +
+                          (wsl.needsRestart
+                               ? "\n\nWindows is saying that the feature is enabled but not in force yet, "
+                                 "which means a restart. That is the most likely reason straight after an "
+                                 "install, and the whole of the fix."
+                               : "") +
+                          "\n\nWhat the launcher asked, and what Windows said:\n\n" + wsl.report,
                       Offer::InstallWsl, false);
             break;
         case Wsl::NoLauncher:
@@ -1510,7 +1561,8 @@ int main(int argc, char **argv)
                       "WSL is running, but it has no C++ toolchain inside it, and that is what a build is made "
                       "with. Installing it is one command.\n\nPress W and the launcher will install cmake and "
                       "a toolchain inside WSL for you. It needs no password: it runs as root inside WSL, which "
-                      "is a place you already own.",
+                      "is a place you already own.\n\nWhat the launcher asked, and what WSL said:\n\n" +
+                          wsl.report,
                       Offer::InstallToolchain, false);
             break;
         default:

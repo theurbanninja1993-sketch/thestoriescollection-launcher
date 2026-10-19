@@ -235,29 +235,6 @@ namespace platform
         return out;
     }
 
-    bool wslUsable()
-    {
-#if defined(_WIN32)
-        // `uname` exists in every distribution and in nothing else, so this answers
-        // "is there a Linux behind wsl.exe" without caring which one it is.
-        return wslAvailable() && std::system("wsl.exe -e uname >nul 2>&1") == 0;
-#else
-        return false;
-#endif
-    }
-
-    bool wslHasToolchain()
-    {
-#if defined(_WIN32)
-        // Asked of the tools themselves rather than of a package list: what matters is
-        // whether a build can run, not how it got there.
-        return std::system("wsl.exe -e cmake --version >nul 2>&1") == 0 &&
-               std::system("wsl.exe -e g++ --version >nul 2>&1") == 0;
-#else
-        return false;
-#endif
-    }
-
     bool runInWindow(const std::string &scriptPath, bool elevated)
     {
         if (scriptPath.empty())

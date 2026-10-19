@@ -79,12 +79,6 @@ namespace platform
     // than letting WSL say what it thinks.
     std::string toWslPath(const std::string &path);
 
-    // Whether WSL is installed *and* has a distribution behind it, and whether that
-    // distribution has the compiler a build needs. Two separate answers, because they
-    // are two separate things to put right, and the launcher offers to do both.
-    bool wslUsable();
-    bool wslHasToolchain();
-
     // Runs a script in its own window that stays open when it finishes, optionally
     // raising Windows' permission prompt first. This is for the things the launcher
     // does *for* the player rather than to them - installing WSL, installing the

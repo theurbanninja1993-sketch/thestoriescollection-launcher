@@ -231,8 +231,15 @@ namespace builder
                     ++j;
                 return output.substr(i, j - i);
             }
+            // hashfile prints "<hash>  <path>"; anything else is not a hash, and taking
+            // its first word as one reported "ps2x_iso" as the disc's hash.
             const size_t end = output.find_first_of(" \t\r\n");
-            return end == std::string::npos ? trim(output) : output.substr(0, end);
+            const std::string first = end == std::string::npos ? trim(output) : output.substr(0, end);
+            return first.size() == 32 && std::all_of(first.begin(), first.end(), [](unsigned char c) {
+                       return std::isxdigit(c) != 0;
+                   })
+                       ? first
+                       : std::string{};
         }
 
         // The manifest names an input and an output; the player's machine decides
@@ -750,11 +757,17 @@ namespace builder
         }
         else
         {
-            status = runCapturing({ps2Iso, "check", image}, "", cb.onLine, pid, output);
+            status = runCapturing({ps2Iso, "check", image, "--boot", recipe.bootFile}, "", cb.onLine, pid, output);
         }
         if (status != 0)
             return failed("reading the disc", status);
         const std::string hash = parseHash(output);
+        if (hash.empty())
+        {
+            if (cb.onLine)
+                cb.onLine("could not read this disc. The reason is in the lines above; the whole check is in the log.");
+            return false;
+        }
         if (hash != recipe.bootHash)
         {
             if (cb.onLine)

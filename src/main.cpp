@@ -1419,7 +1419,7 @@ int main(int argc, char **argv)
     // One background job at a time: the game, or fetching a port's source. Waiting
     // in a thread rather than blocking the loop is what lets the launcher keep
     // answering the window manager while it works, and notice the moment it ends.
-    enum class Job { None, Game, Fetch, Build, Launcher, Optimize };
+    enum class Job { None, Game, Fetch, Build, Launcher };
     std::atomic<int> jobKind{static_cast<int>(Job::None)};
     std::atomic<int> jobStatus{0};
     std::thread jobThread;
@@ -1866,10 +1866,9 @@ int main(int argc, char **argv)
             // A fetch and the launcher's own update both keep every line they print,
             // because a failure is usually the one line a step said - and the screen
             // that showed it is gone by the time anyone can read it.
-            if (kind == Job::Fetch || kind == Job::Launcher || kind == Job::Optimize)
+            if (kind == Job::Fetch || kind == Job::Launcher)
             {
                 const bool update = kind == Job::Launcher;
-                const bool optimize = kind == Job::Optimize;
                 std::vector<std::string> lines;
                 jobStatus = runCapturedAll(command, lines);
                 std::string tail;
@@ -1879,9 +1878,8 @@ int main(int argc, char **argv)
                     tail += "\n";
                 }
                 const std::string logPath =
-                    base + "/logs/" + (update       ? std::string("launcher-update.log")
-                                       : optimize   ? std::string("vu-optimize.log")
-                                                    : games[index].id + "-fetch.log");
+                    base + "/logs/" + (update ? std::string("launcher-update.log")
+                                              : games[index].id + "-fetch.log");
                 std::error_code logEc;
                 std::filesystem::create_directories(std::filesystem::path(logPath).parent_path(), logEc);
                 {
@@ -2399,19 +2397,6 @@ int main(int argc, char **argv)
                         std::fprintf(stderr, "[launcher] the build for %s did not finish\n",
                                      games[index].id.c_str());
                 }
-            }
-            else if (finished == Job::Optimize)
-            {
-                setNotice(status == 0 ? "Microprograms compiled" : "Could not compile them",
-                          status == 0
-                              ? ("Everything the game recorded while you played has been compiled, and it "
-                                 "is in place beside the game. Restart it and the parts that were running "
-                                 "interpreted - which is most of what happens outside - will run compiled "
-                                 "instead.\n\nThe recordings are kept, so a full rebuild later links them "
-                                 "in permanently.")
-                              : ("It did not finish. What it printed is in:\n\n" + base +
-                                 "/logs/vu-optimize.log"),
-                          Offer::None, false);
             }
             else if (finished == Job::Launcher)
             {
@@ -3005,36 +2990,6 @@ int main(int argc, char **argv)
             x += artWidth + gap;
         }
 
-        // Recordings waiting to be compiled, which is worth saying out loud: the
-        // difference between compiled and interpreted microprograms is the difference
-        // between 60 and 20 frames a second once the game leaves the intro. This is the
-        // handoff's launcher contract - notice, offer, compile - and it matters because
-        // a build's own learn route only ever sees the intro, so every player has some.
-        const std::string pendingVu = games[selected].portConfigured
-                                          ? pendingVuPrograms(games[selected].portDir)
-                                          : std::string{};
-        if (!pendingVu.empty())
-        {
-            // Said where the card is, not in a corner: a player who never learns this
-            // exists plays the whole game at a third of its speed.
-            const float w = static_cast<float>(GetScreenWidth());
-            const float h = static_cast<float>(GetScreenHeight());
-            const float fs = std::max(0.8f, std::min(2.5f, std::min(w / 1280.0f, h / 720.0f)));
-            const auto px = [fs](float v) { return static_cast<int>(std::lround(v * fs)); };
-            const std::vector<std::string> note = wrapText(
-                "This game recorded microprograms while you played that are not compiled yet. "
-                "Uncompiled ones run about ten times slower, which is why it crawls outside. "
-                "Press O to compile them - it takes about a minute.",
-                px(16), w * 0.72f);
-            float y = h - 150.0f * fs;
-            for (const std::string &line : note)
-            {
-                DrawText(line.c_str(), static_cast<int>(w * 0.5f - MeasureText(line.c_str(), px(16)) * 0.5f),
-                         static_cast<int>(y), px(16), (Color){240, 200, 120, 255});
-                y += 22.0f * fs;
-            }
-        }
-
         // The launcher's own update button, in the corner where the version used to
         // sit alone. It is the one control here that is not about a game: the
         // launcher cannot update itself, so it says what the repository has and
@@ -3192,14 +3147,6 @@ int main(int argc, char **argv)
         }
         if ((IsKeyPressed(KEY_U) || padFetch) && games[selected].portConfigured)
             startJob(Job::Fetch, selected, fetchCommand(games[selected]), true);
-
-        // Optimize, the handoff's launcher contract: recordings waiting means the game
-        // is running some of its microprograms interpreted, and this compiles them.
-        if (IsKeyPressed(KEY_O) && !pendingVu.empty())
-        {
-            std::fprintf(stderr, "[launcher] optimizing %s (%s)\n", games[selected].id.c_str(), pendingVu.c_str());
-            startJob(Job::Optimize, selected, vuOptimizeCommand(games[selected].portDir), false);
-        }
 
         // The launcher's own update button. Click it, or press C / L1. When a newer
         // release is known the same action opens its page instead of asking again.

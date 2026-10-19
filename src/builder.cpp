@@ -898,7 +898,7 @@ namespace builder
             // off the desktop. Some graphics stacks refuse a hidden window (GLXBadFBConfig
             // under WSL), and then nothing is recorded, so a pass that records nothing is run
             // once more with a visible window before the build gives up.
-            auto learnPass = [&](bool hidden) -> int
+            auto learnPass = [&](bool hidden, bool virtualDisplay) -> int
             {
                 std::vector<std::string> environment = {"PS2X_NO_LAUNCH_MENU=1",
                                                         "PS2X_VU1_LEARN=" + learn,
@@ -917,6 +917,10 @@ namespace builder
                 std::vector<std::string> learner = {runner, bootPath};
                 if (fs::exists("/usr/bin/timeout", ec))
                     learner = {"/usr/bin/timeout", "400", runner, bootPath};
+                // A private X server, when the xvfb package is installed: the game then talks to
+                // that instead of the desktop, which is where a display can refuse the visual.
+                if (virtualDisplay && fs::exists("/usr/bin/xvfb-run", ec))
+                    learner.insert(learner.begin(), {"xvfb-run", "-a"});
                 return runTool(learner, learn, environment, cb.onLine, pid);
             };
             auto collectCaptures = [&]()
@@ -931,7 +935,7 @@ namespace builder
                 return found;
             };
 
-            int learnStatus = learnPass(true);
+            int learnStatus = learnPass(true, false);
             if (learnStatus != 0 && cb.onLine)
                 cb.onLine("that pass ended early; that is fine if it recorded something");
             std::vector<std::string> captures = collectCaptures();
@@ -939,9 +943,18 @@ namespace builder
             {
                 if (cb.onLine)
                     cb.onLine("the pass recorded nothing with a hidden window; running it once more with a visible one");
-                learnStatus = learnPass(false);
+                learnStatus = learnPass(false, false);
                 if (learnStatus != 0 && cb.onLine)
                     cb.onLine("that visible pass ended early too");
+                captures = collectCaptures();
+            }
+            if (captures.empty() && fs::exists("/usr/bin/xvfb-run", ec))
+            {
+                if (cb.onLine)
+                    cb.onLine("still nothing; running it once more under a private virtual display");
+                learnStatus = learnPass(true, true);
+                if (learnStatus != 0 && cb.onLine)
+                    cb.onLine("that virtual-display pass ended early too");
                 captures = collectCaptures();
             }
 

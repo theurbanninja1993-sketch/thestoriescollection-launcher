@@ -1510,6 +1510,7 @@ int main(int argc, char **argv)
                    "rem nothing at all when one name in a list is unknown - and a name that has\r\n"
                    "rem been renamed is exactly how this failed once already.\r\n"
                    "wsl -u root -- bash -lc \"apt-get install -y libgl1 libopengl0 libglu1-mesa\"\r\n"
+                   "wsl -u root -- bash -lc \"apt-get install -y xvfb\"\r\n"
                    "rem What a build needs rather than what a program needs to run: the headers\r\n"
                    "rem and linker stubs. The runtime libraries are not enough, and a missing one\r\n"
                    "rem of these stops the port's configure dead - which is exactly how the first\r\n"

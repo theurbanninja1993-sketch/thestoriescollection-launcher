@@ -1513,7 +1513,9 @@ int main(int argc, char **argv)
             const auto probe = [&](const std::string &command)
             {
                 std::vector<std::string> lines;
-                const int status = runCapturedAll(command, lines);
+                // stderr folded in, because that is where the reason is: chmod's complaint
+                // about an unquoted path was invisible for a whole round of this.
+                const int status = runCapturedAll(command + " 2>&1", lines);
                 std::string said = lines.empty() ? std::string("no output") : plainText(lines.front());
                 if (said.size() > 160)
                     said.resize(160);
@@ -1530,9 +1532,9 @@ int main(int argc, char **argv)
             // And the execute bit, which a file unpacked on Windows does not have. Set
             // as root so it cannot fail on ownership, and its answer ignored: whether it
             // worked is not the question, whether the launcher then runs is.
-            probe("wsl.exe -u root -e chmod +x " + wslDirectory + "/ps2x_launcher");
+            probe("wsl.exe -u root -e chmod +x \"" + wslDirectory + "/ps2x_launcher\"");
             const std::string runsCommand =
-                "wsl.exe --cd " + wslDirectory + " ./ps2x_launcher --version";
+                "wsl.exe --cd \"" + wslDirectory + "\" ./ps2x_launcher --version";
             // uname answers "is there a Linux behind wsl.exe"; cmake and g++ are asked
             // directly rather than read out of a package list, because what matters is
             // whether a build can run, not how it got there.
@@ -1589,8 +1591,8 @@ int main(int argc, char **argv)
             if (out)
                 out << wsl.report;
         }
-        const std::string command = "wsl --cd " + platform::toWslPath(directory) +
-                                    " ./ps2x_launcher --build " + std::to_string(selected);
+        const std::string command = "wsl --cd \"" + platform::toWslPath(directory) +
+                                    "\" ./ps2x_launcher --build " + std::to_string(selected);
         switch (static_cast<Wsl>(wsl.state.load()))
         {
         case Wsl::NoWsl:
@@ -1655,8 +1657,8 @@ int main(int argc, char **argv)
             // second and closes takes its reason with it, and that is precisely what
             // happened. On failure the script says so and waits.
             const std::string wslDirectory = platform::toWslPath(directory);
-            std::string command = "wsl -u root -e chmod +x " + wslDirectory + "/ps2x_launcher\r\n"
-                                  "wsl --cd " + wslDirectory + " ./ps2x_launcher --build " +
+            std::string command = "wsl -u root -e chmod +x \"" + wslDirectory + "/ps2x_launcher\"\r\n"
+                                  "wsl --cd \"" + wslDirectory + "\" ./ps2x_launcher --build " +
                                   std::to_string(selected);
             if (!games[selected].disc.empty())
                 command += " --image \"" + platform::toWslPath(games[selected].disc) + "\"";

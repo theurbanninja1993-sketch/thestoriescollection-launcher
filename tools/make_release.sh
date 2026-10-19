@@ -157,7 +157,11 @@ EOF
 # ------------------------------------------------------------------- platforms
 if [ $DO_LINUX -eq 1 ]; then
     say "building the launcher for Linux"
-    run cmake -S "$ROOT" -B "$ROOT/build-release" -DCMAKE_BUILD_TYPE=Release
+    # C17 for the C parts, so that strtol does not become the C23 name that only
+    # glibc 2.38 and later have. The maths wrappers that stop the binary asking for
+    # GLIBC_2.43 live in CMakeLists.txt, where the linker flags belong.
+    run cmake -S "$ROOT" -B "$ROOT/build-release" -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_FLAGS="-std=gnu17"
     run cmake --build "$ROOT/build-release" --target ps2x_launcher -j "$(nproc)"
     [ -x "$ROOT/build-release/ps2x_launcher" ] || die "no binary was produced"
     run strip "$ROOT/build-release/ps2x_launcher" 2>/dev/null || true

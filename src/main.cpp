@@ -1432,8 +1432,8 @@ int main(int argc, char **argv)
                    "rem The graphics and audio libraries the launcher window itself needs. Installed "
                    "separately, and allowed to fail, because a distribution that spells one of them "
                    "differently should not lose the compiler over it.\r\n"
-                   "wsl -u root -- bash -lc \"apt-get install -y libgl1 libx11-6 libxrandr2 libxi6 "
-                   "libxcursor1 libxinerama1 libasound2\"\r\n"
+                   "wsl -u root -- bash -lc \"apt-get install -y libgl1 libopengl0 libglu1-mesa "
+                   "libx11-6 libxrandr2 libxi6 libxcursor1 libxinerama1 libasound2\"\r\n"
                    "echo.\r\n"
                    "echo When that has finished, press B in the launcher again.\r\n"
                    "pause\r\n";
@@ -1565,6 +1565,16 @@ int main(int argc, char **argv)
     // offer that puts it right.
     const auto showWslOutcome = [&]
     {
+        // Kept beside the launcher as well as shown: a report is easier to send than
+        // it is to retype, and this is the one thing that has told us the truth every
+        // time the launcher has been wrong about a machine.
+        {
+            std::error_code ec;
+            std::filesystem::create_directories(base + "/logs", ec);
+            std::ofstream out(base + "/logs/wsl.txt", std::ios::binary | std::ios::trunc);
+            if (out)
+                out << wsl.report;
+        }
         const std::string command =
             "wsl --cd \"" + directory + "\" ./ps2x_launcher --build " + std::to_string(selected);
         switch (static_cast<Wsl>(wsl.state.load()))
@@ -1638,15 +1648,17 @@ int main(int argc, char **argv)
             if (out)
                 out << "@echo off\r\n"
                        "title Building in WSL\r\n"
+                       "if not exist \"" + base + "\\logs\" mkdir \"" + base + "\\logs\"\r\n"
                        "rem Started by The Stories Collection launcher. It waits for the build\r\n"
                        "rem window to close, and if the command failed it keeps the reason on\r\n"
                        "rem the screen instead of closing over it.\r\n"
                     << command
-                    << "\r\n"
+                    << " >> \"" + base + "\\logs\\build-wsl.txt\" 2>&1\r\n"
                        "if errorlevel 1 (\r\n"
                        "    echo.\r\n"
-                       "    echo That is why the window closed. The launcher is still running;\r\n"
-                       "    echo the same reason is in the launcher, under logs.\r\n"
+                       "    echo That is why the window closed. The whole of it was kept:\r\n"
+                       "    echo.\r\n"
+                       "    echo   " + base + "\\logs\\build-wsl.txt\r\n"
                        "    pause\r\n"
                        ")\r\n";
             out.close();

@@ -2264,10 +2264,10 @@ int main(int argc, char **argv)
                                         "installed rather than downloaded.\n\nPress W and the launcher will "
                                         "install everything a build needs, inside WSL. It needs no password: it "
                                         "runs as root there, which is a place you already own.\n\nThe "
-                                        "cached configure has been thrown away, so the next attempt will "
-                                        "look for what it needs instead of remembering not finding it - "
-                                        "which is what kept this failing after the packages were there."
-                                        "\n\nWhat the build said is in:\n\n" + buildReportLog,
+                                        "cached configure has also been thrown away, in case it remembers a "
+                                        "search from before something was installed - a cheap precaution, "
+                                        "not a diagnosis.\n\nWhat the build said is in:\n\n" +
+                                            buildReportLog,
                                         Offer::InstallToolchain, false);
                           }
                       }

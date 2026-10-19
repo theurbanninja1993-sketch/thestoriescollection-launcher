@@ -1429,6 +1429,11 @@ int main(int argc, char **argv)
                    "echo.\r\n"
                    "wsl -u root -- bash -lc \"apt-get update && apt-get install -y cmake build-essential "
                    "git curl ca-certificates python3\"\r\n"
+                   "rem The graphics and audio libraries the launcher window itself needs. Installed "
+                   "separately, and allowed to fail, because a distribution that spells one of them "
+                   "differently should not lose the compiler over it.\r\n"
+                   "wsl -u root -- bash -lc \"apt-get install -y libgl1 libx11-6 libxrandr2 libxi6 "
+                   "libxcursor1 libxinerama1 libasound2\"\r\n"
                    "echo.\r\n"
                    "echo When that has finished, press B in the launcher again.\r\n"
                    "pause\r\n";
@@ -1450,7 +1455,7 @@ int main(int argc, char **argv)
     // draws the menu is a window that stops answering - which is indistinguishable from
     // a crash, and was reported as one. So it is asked in the background, the notice
     // says it is being asked, and the answer is remembered so it is asked once.
-    enum class Wsl { Unknown, Asking, Ready, NoWsl, NoLauncher, NoToolchain };
+    enum class Wsl { Unknown, Asking, Ready, NoWsl, NoLauncher, NoRun, NoToolchain };
 
     // The question and the answer together, in something that joins its own thread
     // however main leaves: a thread that is joinable and never joined is a terminate().
@@ -1459,6 +1464,7 @@ int main(int argc, char **argv)
         std::atomic<int> state{static_cast<int>(Wsl::Unknown)};
         std::string report;      // what was asked, and what came back
         bool needsRestart = false;
+        bool noDisplay = false;  // WSL is giving Linux no screen to draw on
         std::thread thread;
         ~WslAsker()
         {
@@ -1511,6 +1517,8 @@ int main(int argc, char **argv)
 
             wsl.report.clear();
             wsl.report += std::string("  wsl.exe found: ") + (platform::wslAvailable() ? "yes" : "no") + "\n";
+            const std::string runsCommand =
+                "wsl.exe --cd \"" + directory + "\" ./ps2x_launcher --version";
             // uname answers "is there a Linux behind wsl.exe"; cmake and g++ are asked
             // directly rather than read out of a package list, because what matters is
             // whether a build can run, not how it got there.
@@ -1520,6 +1528,14 @@ int main(int argc, char **argv)
             // also means a distribution with no user set up yet still answers.
             const bool usable = platform::wslAvailable() && probe("wsl.exe -u root -e uname");
             const bool launcher = platform::fileIsExecutable(directory + "/ps2x_launcher");
+            // Does Linux have a screen? WSLg provides one, and without it the launcher
+            // cannot open a window at all - which is not something to install, so it is
+            // worth telling apart from everything else.
+            const bool screen = usable && (probe("wsl.exe -u root -e printenv DISPLAY") ||
+                                           probe("wsl.exe -u root -e printenv WAYLAND_DISPLAY"));
+            // And does the Linux launcher itself start there? A window that opens for a
+            // second and closes is exactly what this catches, with the reason kept.
+            const bool runs = usable && launcher && probe(runsCommand);
             const bool cmake = usable && probe("wsl.exe -u root -e cmake --version");
             const bool compiler = usable && probe("wsl.exe -u root -e g++ --version");
             // What Windows says when the feature is enabled but has not taken effect yet.
@@ -1536,8 +1552,10 @@ int main(int argc, char **argv)
                                lower.find("virtual machine platform") != std::string::npos ||
                                lower.find("not enabled") != std::string::npos ||
                                lower.find("no installed distributions") != std::string::npos;
+            wsl.noDisplay = !screen;
             wsl.state = static_cast<int>(!usable              ? Wsl::NoWsl
                                         : !launcher           ? Wsl::NoLauncher
+                                        : !runs               ? Wsl::NoRun
                                         : !(cmake && compiler) ? Wsl::NoToolchain
                                                                : Wsl::Ready);
         });
@@ -1573,13 +1591,22 @@ int main(int argc, char **argv)
                       "this folder.",
                       Offer::None, false);
             break;
+        case Wsl::NoRun:
         case Wsl::NoToolchain:
-            setNotice("WSL needs a compiler",
-                      "WSL is running, but it has no C++ toolchain inside it, and that is what a build is made "
-                      "with. Installing it is one command.\n\nPress W and the launcher will install cmake and "
-                      "a toolchain inside WSL for you. It needs no password: it runs as root inside WSL, which "
-                      "is a place you already own.\n\nWhat the launcher asked, and what WSL said:\n\n" +
-                          wsl.report,
+            setNotice(wsl.state.load() == static_cast<int>(Wsl::NoRun) ? "The Linux launcher will not start"
+                                                                       : "WSL needs a compiler",
+                      std::string("WSL is there, but something it needs is not. The message above is the one "
+                                  "that flashed past in the window that closed - this is the same thing, kept "
+                                  "where it can be read.\n\nPress W and the launcher will install cmake, a C++ "
+                                  "toolchain and the graphics libraries a window needs, inside WSL. It needs no "
+                                  "password: it runs as root inside WSL, which is a place you already own.") +
+                          (wsl.noDisplay
+                               ? "\n\nNote that WSL is not giving Linux a screen at all (no DISPLAY and no "
+                                 "WAYLAND_DISPLAY). That is not something to install: it needs Windows 11, or "
+                                 "Windows 10 with the WSLg update, and until then the build window cannot be "
+                                 "shown here."
+                               : "") +
+                          "\n\nWhat the launcher asked, and what WSL said:\n\n" + wsl.report,
                       Offer::InstallToolchain, false);
             break;
         default:
@@ -1598,8 +1625,33 @@ int main(int argc, char **argv)
                 arguments.push_back("--image");
                 arguments.push_back(platform::toWslPath(games[selected].disc));
             }
-            const bool started = platform::runDetached("wsl.exe", arguments);
-            std::fprintf(stderr, "[launcher] %s wsl.exe\n", started ? "started" : "could not start");
+            // Through a script rather than straight at wsl.exe: a window that opens for a
+            // second and closes takes its reason with it, and that is precisely what
+            // happened. On failure the script says so and waits.
+            std::string command = "wsl --cd \"" + directory + "\" ./ps2x_launcher --build " +
+                                  std::to_string(selected);
+            if (!games[selected].disc.empty())
+                command += " --image \"" + platform::toWslPath(games[selected].disc) + "\"";
+            const std::string script = updateStagingDirectory() + "-build.cmd";
+            std::ofstream out(script, std::ios::binary | std::ios::trunc);
+            const bool written = static_cast<bool>(out);
+            if (out)
+                out << "@echo off\r\n"
+                       "title Building in WSL\r\n"
+                       "rem Started by The Stories Collection launcher. It waits for the build\r\n"
+                       "rem window to close, and if the command failed it keeps the reason on\r\n"
+                       "rem the screen instead of closing over it.\r\n"
+                    << command
+                    << "\r\n"
+                       "if errorlevel 1 (\r\n"
+                       "    echo.\r\n"
+                       "    echo That is why the window closed. The launcher is still running;\r\n"
+                       "    echo the same reason is in the launcher, under logs.\r\n"
+                       "    pause\r\n"
+                       ")\r\n";
+            out.close();
+            const bool started = written && platform::runInWindow(script, false);
+            std::fprintf(stderr, "[launcher] %s %s\n", started ? "started" : "could not start", script.c_str());
             // Out of the way, because the window that matters from here is the one that
             // just opened: it holds the build's confirmation and then its progress.
             if (started)

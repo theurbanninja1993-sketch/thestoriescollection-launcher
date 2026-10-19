@@ -190,6 +190,97 @@ namespace platform
 #endif
     }
 
+    bool runDetached(const std::string &program, const std::vector<std::string> &arguments)
+    {
+        if (program.empty())
+            return false;
+#if defined(_WIN32)
+        // `start` gives it its own window and returns at once. The window is left
+        // visible on purpose: if WSL cannot run what it was given, the reason is on
+        // that screen rather than nowhere, and a launcher that fails silently has cost
+        // this project two rounds already.
+        std::string command = "start \"\" \"" + program + "\"";
+        for (const std::string &argument : arguments)
+            command += " \"" + argument + "\"";
+        return std::system(command.c_str()) == 0;
+#else
+        std::string command = quotedForShell(program);
+        for (const std::string &argument : arguments)
+            command += " " + quotedForShell(argument);
+        return std::system((command + " >/dev/null 2>&1 &").c_str()) == 0;
+#endif
+    }
+
+    bool wslAvailable()
+    {
+#if defined(_WIN32)
+        // wsl.exe ships with Windows and sits in System32 whether or not a
+        // distribution is installed. If there is none, running it says so in the
+        // window the launcher deliberately leaves visible.
+        std::error_code ec;
+        return fs::exists("C:\\Windows\\System32\\wsl.exe", ec);
+#else
+        return false;
+#endif
+    }
+
+    std::string toWslPath(const std::string &path)
+    {
+        if (path.size() < 2 || path[1] != ':')
+            return path;
+        std::string out = "/mnt/";
+        out += path[0] >= 'A' && path[0] <= 'Z' ? static_cast<char>(path[0] + 32) : path[0];
+        for (size_t i = 2; i < path.size(); ++i)
+            out += path[i] == '\\' ? '/' : path[i];
+        return out;
+    }
+
+    bool wslUsable()
+    {
+#if defined(_WIN32)
+        // `uname` exists in every distribution and in nothing else, so this answers
+        // "is there a Linux behind wsl.exe" without caring which one it is.
+        return wslAvailable() && std::system("wsl.exe -e uname >nul 2>&1") == 0;
+#else
+        return false;
+#endif
+    }
+
+    bool wslHasToolchain()
+    {
+#if defined(_WIN32)
+        // Asked of the tools themselves rather than of a package list: what matters is
+        // whether a build can run, not how it got there.
+        return std::system("wsl.exe -e cmake --version >nul 2>&1") == 0 &&
+               std::system("wsl.exe -e g++ --version >nul 2>&1") == 0;
+#else
+        return false;
+#endif
+    }
+
+    bool runInWindow(const std::string &scriptPath, bool elevated)
+    {
+        if (scriptPath.empty())
+            return false;
+#if defined(_WIN32)
+        const std::string parameters = "/c \"" + scriptPath + "\"";
+        if (elevated)
+        {
+            // "runas" is what raises the consent prompt. A refusal comes back as
+            // SE_ERR_ACCESSDENIED, which is a player saying no rather than a failure.
+            const std::wstring wideParameters(parameters.begin(), parameters.end());
+            const HINSTANCE result =
+                ShellExecuteW(nullptr, L"runas", L"cmd.exe", wideParameters.c_str(), nullptr, SW_SHOWNORMAL);
+            return reinterpret_cast<INT_PTR>(result) > 32;
+        }
+        return std::system(("start \"\" cmd.exe " + parameters).c_str()) == 0;
+#else
+        (void)scriptPath;
+        (void)elevated;
+        return false;
+#endif
+    }
+
     bool runScriptDetached(const std::string &scriptPath)
     {
         if (scriptPath.empty())

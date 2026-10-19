@@ -63,6 +63,35 @@ namespace platform
     // gone - and it has to still be running when the launcher exits.
     bool runScriptDetached(const std::string &scriptPath);
 
+    // Starts another program and returns at once, with its own window. The Windows
+    // launcher needs this to hand a build to the Linux launcher under WSL, which is
+    // the difference between "Windows users can build" and "Windows users can build
+    // if they are told a command line".
+    bool runDetached(const std::string &program, const std::vector<std::string> &arguments);
+
+    // Whether WSL is installed at all, so the launcher can say what is missing rather
+    // than start something that is not there. False everywhere but Windows.
+    bool wslAvailable();
+
+    // A Windows path as WSL sees it: C:\a\b becomes /mnt/c/a/b. WSL is where a build
+    // happens, so anything handed to it has to be in its own terms. A path that is not
+    // a drive path is passed through unchanged - guessing at a UNC path would be worse
+    // than letting WSL say what it thinks.
+    std::string toWslPath(const std::string &path);
+
+    // Whether WSL is installed *and* has a distribution behind it, and whether that
+    // distribution has the compiler a build needs. Two separate answers, because they
+    // are two separate things to put right, and the launcher offers to do both.
+    bool wslUsable();
+    bool wslHasToolchain();
+
+    // Runs a script in its own window that stays open when it finishes, optionally
+    // raising Windows' permission prompt first. This is for the things the launcher
+    // does *for* the player rather than to them - installing WSL, installing the
+    // toolchain - which take minutes and whose output is the point.
+    bool runInWindow(const std::string &scriptPath, bool elevated);
+
+
     // Real pixels instead of a DPI-scaled window, which is what makes the layout
     // the size it thinks it is on a display at 125% or 150%. A no-op away from
     // Windows, and it has to be called before the window exists.

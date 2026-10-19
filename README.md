@@ -263,10 +263,25 @@ port is cross-compiled from Linux and has never been built on Windows itself. Pr
 wsl --cd . ./ps2x_launcher
 ```
 
-Press `B` in that window. It is the same launcher, reading the same `launcher.ini`
-and the same `port/`, so what it builds is what this one plays — and under WSL it
-cross-compiles the Windows port, which is the build that is any use there. WSL needs
-cmake and a C++ toolchain inside it; the wizard names what is missing.
+The launcher runs that for you: pressing `B` on Windows starts the Linux launcher
+under WSL on the build for that game, so there is no command line to type. It is the
+same launcher, reading the same `launcher.ini` and the same `port/`, so what it
+builds is what this one plays — and under WSL it cross-compiles the Windows port,
+which is the build that is any use there.
+
+**WSL itself is not part of Windows** — it is a free optional feature, one command
+and one restart to add. The launcher offers to do both halves of that setup, each as
+a window that stays open so the outcome can be read:
+
+- **No WSL at all** → it offers to run `wsl --install`, which needs your permission
+  (Windows raises the prompt) and then a restart.
+- **WSL, but no compiler in it** → it offers to install cmake and a C++ toolchain
+  inside WSL. That needs no password: it runs as root *inside* WSL, which is a place
+  the launcher already owns, and it cannot reach anything outside it.
+
+Either way it says which state the machine is in and what pressing `W` will do, and
+afterwards it works the rest out from what is there. If this Windows is older than
+the one-line install, the window says so rather than failing quietly.
 
 ## Licence
 

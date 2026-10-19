@@ -988,6 +988,11 @@ int main(int argc, char **argv)
     int launchIndex = -1;
     bool listPads = false;
     std::string selfUpdateVersion;
+    // --build and --image: how the Windows launcher hands a build to this one under
+    // WSL. It is the same config and the same port/, so the game is named by its
+    // place in that list rather than by anything that could drift.
+    bool buildOnStart = false;
+    std::string startImage;
     for (int i = 1; i < argc; ++i)
     {
         if (std::strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc)
@@ -1010,6 +1015,13 @@ int main(int argc, char **argv)
                             games[i].available ? "available" : "coming soon");
             return 0;
         }
+        else if (std::strcmp(argv[i], "--build") == 0 && i + 1 < argc)
+        {
+            startSelection = std::atoi(argv[++i]);
+            buildOnStart = true;
+        }
+        else if (std::strcmp(argv[i], "--image") == 0 && i + 1 < argc)
+            startImage = argv[++i];
         else if (std::strcmp(argv[i], "--self-update") == 0 && i + 1 < argc)
         {
             selfUpdateVersion = argv[++i];
@@ -1374,6 +1386,39 @@ int main(int argc, char **argv)
     bool notice = false;
     std::string noticeTitle;
     std::string noticeText;
+    // A notice can offer to put something right rather than only describe it. Both of
+    // the things worth offering are Windows-side and take minutes, so each is a script
+    // in its own window with the outcome left on the screen.
+    enum class Offer { None, InstallWsl, InstallToolchain };
+    Offer noticeOffer = Offer::None;
+    const auto offerScript = [](Offer which) -> std::string
+    {
+        if (which == Offer::InstallWsl)
+            return "@echo off\r\n"
+                   "rem WSL is the Linux inside Windows that builds the port. It is a free\r\n"
+                   "rem optional Windows feature; nothing else on this PC is touched.\r\n"
+                   "echo Installing WSL. Windows will ask for permission first.\r\n"
+                   "echo.\r\n"
+                   "wsl --install\r\n"
+                   "echo.\r\n"
+                   "echo If Windows says a restart is needed, restart, then press B in the\r\n"
+                   "echo launcher again. If it says the option is unknown, this Windows is\r\n"
+                   "echo older than the one-line install and the README has the manual steps.\r\n"
+                   "pause\r\n";
+        if (which == Offer::InstallToolchain)
+            return "@echo off\r\n"
+                   "rem The compiler the port is built with, inside WSL. It runs as root\r\n"
+                   "rem inside WSL, which is a place this launcher already owns - so it needs\r\n"
+                   "rem no password and cannot reach anything outside WSL.\r\n"
+                   "echo Installing cmake and a C++ toolchain inside WSL.\r\n"
+                   "echo.\r\n"
+                   "wsl -u root -- bash -lc \"apt-get update && apt-get install -y cmake build-essential "
+                   "git curl ca-certificates python3\"\r\n"
+                   "echo.\r\n"
+                   "echo When that has finished, press B in the launcher again.\r\n"
+                   "pause\r\n";
+        return {};
+    };
 
     // Whether a run also cross-compiles Windows. WSL is a Linux machine running on a
     // Windows one, so there the Windows build is the one that is any use; anywhere
@@ -1813,6 +1858,27 @@ int main(int argc, char **argv)
         // Which names this pad's buttons go by, read once a frame so a controller
         // plugged in or swapped mid-session is picked up. Until one has been touched,
         // the first slot is the best guess there is.
+        // --build: someone else asked for this build, so it opens on it rather than on
+        // the menu. Once, on the first frame, before anything is drawn.
+        if (buildOnStart)
+        {
+            buildOnStart = false;
+            if (startImage.empty())
+            {
+                sources = builder::findSources(base);
+                sourcePick = 0;
+                wizard = Wizard::Pick;
+            }
+            else
+            {
+                wizardImage = startImage;
+                wizardLabel = startImage;
+                wizardFromPicker = false;
+                dialogChoice = 0; // Start
+                wizard = Wizard::Confirm;
+            }
+        }
+
         const PadNames pad = padNamesFor(activePad >= 0 ? activePad : 0);
 
         // Away from the menu. Closing the window is ignored on purpose: the work is
@@ -2050,6 +2116,9 @@ int main(int argc, char **argv)
                               (Color){200, 208, 224, 255}, 26.0f * fs);
             drawCenteredLines({usingController ? (pad.bottom + " closes this") : "any key closes this"}, w * 0.5f,
                               h - 54.0f * fs, px(16), (Color){120, 130, 150, 255}, 22.0f * fs);
+            if (noticeOffer != Offer::None)
+                drawCenteredLines({"W  -  let the launcher do it"}, w * 0.5f, h - 86.0f * fs, px(18),
+                                  (Color){240, 200, 120, 255}, 26.0f * fs);
             EndDrawing();
 
             if (!screenshotPath.empty())
@@ -2057,9 +2126,38 @@ int main(int argc, char **argv)
                 TakeScreenshot(screenshotPath.c_str());
                 std::fprintf(stderr, "[launcher] wrote %s\n", screenshotPath.c_str());
             }
+            // The offer first: pressing its key must not also close the notice, because
+            // what it does takes minutes and the notice is where the outcome is read.
+            if (noticeOffer != Offer::None && IsKeyPressed(KEY_W))
+            {
+                const Offer which = noticeOffer;
+                noticeOffer = Offer::None;
+                const std::string script = updateStagingDirectory() +
+                                           (which == Offer::InstallWsl ? "-install-wsl.cmd"
+                                                                       : "-install-toolchain.cmd");
+                std::ofstream out(script, std::ios::binary | std::ios::trunc);
+                const bool written = static_cast<bool>(out);
+                if (out)
+                    out << offerScript(which);
+                out.close();
+                const bool started = written && platform::runInWindow(script, which == Offer::InstallWsl);
+                std::fprintf(stderr, "[launcher] %s %s\n", started ? "offered" : "could not run", script.c_str());
+                noticeTitle = started ? "Running that for you" : "Could not run that";
+                noticeText = started
+                                 ? ("A window has opened with it, and it stays open when it finishes. "
+                                    "Windows may ask for permission first.\n\nWhen it is done, press B here "
+                                    "again - the launcher works the rest out from what is there.")
+                                 : ("The launcher could not start it. What it would have run is written to:\n\n" +
+                                    script);
+                notice = true;
+                continue;
+            }
             if (GetKeyPressed() != 0 || IsMouseButtonPressed(MOUSE_BUTTON_LEFT) ||
                 padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_DOWN) || padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
+            {
                 notice = false;
+                noticeOffer = Offer::None;
+            }
             continue;
         }
         if (fetchReport)
@@ -2467,10 +2565,11 @@ int main(int argc, char **argv)
         // A press that cannot be honoured says why. Doing nothing at all is what "B
         // does nothing" was, and it reads as a broken key rather than as a missing
         // toolchain or a source that has not been fetched.
-        const auto explain = [&](const std::string &title, const std::string &text)
+        const auto explain = [&](const std::string &title, const std::string &text, Offer offer = Offer::None)
         {
             noticeTitle = title;
             noticeText = text;
+            noticeOffer = offer;
             notice = true;
         };
         if (IsKeyPressed(KEY_B) || padBuild)
@@ -2484,10 +2583,68 @@ int main(int argc, char **argv)
                         "Press U (or Square/X) to fetch this game's source. A build needs it, and the card "
                         "says which revision is here once it has one.");
             else if (!builder::supported())
-                explain("Building needs Linux",
-                        std::string(builder::unsupportedNote()) +
-                            "\n\nIn a terminal in this folder:\n\nwsl --cd \"" + directory +
-                            "\" ./ps2x_launcher\n\nPress B in that window.");
+            {
+                // Building is done by Linux, and a Windows player should not have to be
+                // told a command line. The Linux launcher ships in this folder, so this
+                // starts it under WSL on the build for this game: the same launcher.ini,
+                // the same port/, and under WSL it cross-compiles the Windows port -
+                // which is the build this launcher then plays.
+                const std::string linuxLauncher = directory + "/ps2x_launcher";
+                const std::string command = "wsl --cd \"" + directory + "\" ./ps2x_launcher --build " +
+                                            std::to_string(selected);
+                if (!platform::wslUsable())
+                    explain("WSL is not set up yet",
+                            "WSL is what lets this launcher build. It is Linux inside Windows, the port is "
+                            "built by Linux, and WSL is a free optional Windows feature - not part of Windows "
+                            "by default, but one command and one restart to add.\n\nPress W and the launcher "
+                            "will install it for you. Windows will ask for permission first, and will say if a "
+                            "restart is needed.",
+                            Offer::InstallWsl);
+                else if (!platform::fileIsExecutable(linuxLauncher))
+                    explain("The Linux launcher is missing",
+                            "WSL is ready, but the Linux launcher is not in this folder, so there is nothing "
+                            "to hand the build to. It ships in the Windows release - download it again and "
+                            "unpack it over this folder.");
+                else if (!platform::wslHasToolchain())
+                    explain("WSL needs a compiler",
+                            "WSL is running, but it has no C++ toolchain inside it, and that is what a build "
+                            "is made with. Installing it is one command.\n\nPress W and the launcher will "
+                            "install cmake and a toolchain inside WSL for you. It needs no password: it runs "
+                            "as root inside WSL, which is a place you already own.",
+                            Offer::InstallToolchain);
+                else if (platform::wslAvailable() && platform::fileIsExecutable(linuxLauncher))
+                {
+                    std::vector<std::string> arguments;
+                    arguments.push_back("--cd");
+                    arguments.push_back(directory);
+                    arguments.push_back("./ps2x_launcher");
+                    arguments.push_back("--build");
+                    arguments.push_back(std::to_string(selected));
+                    if (!games[selected].disc.empty())
+                    {
+                        arguments.push_back("--image");
+                        arguments.push_back(platform::toWslPath(games[selected].disc));
+                    }
+                    const bool started = platform::runDetached("wsl.exe", arguments);
+                    std::fprintf(stderr, "[launcher] %s wsl.exe\n", started ? "started" : "could not start");
+                    explain(started ? "Building in WSL" : "Building needs Linux",
+                            started ? ("A build window has opened. Press Start in it. It builds the Windows "
+                                       "port, and this launcher plays it.\n\nIf no window appeared, WSL could "
+                                       "not start the Linux launcher - cmake and a C++ toolchain have to be "
+                                       "installed inside WSL. The command to run by hand is:\n\n" + command)
+                                    : (std::string(builder::unsupportedNote()) + "\n\nWSL was not found on "
+                                       "this PC. The command, once it is:\n\n" + command));
+                }
+                else
+                    explain("Building needs Linux",
+                            std::string(builder::unsupportedNote()) +
+                                (platform::wslAvailable()
+                                     ? "\n\nThe Linux launcher is missing from this folder, so there is nothing "
+                                       "to hand the build to. Download the release again."
+                                     : "\n\nWSL was not found on this PC - Windows has a one-line install for "
+                                       "it, and the launcher README has it.") +
+                                "\n\nThe command, in a terminal in this folder:\n\n" + command);
+            }
             // A configured disc= skips the picker entirely. Otherwise look for one and
             // say what to do when there is none, rather than opening an empty list.
             else if (!games[selected].disc.empty())

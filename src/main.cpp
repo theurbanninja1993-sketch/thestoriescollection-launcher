@@ -1368,6 +1368,13 @@ int main(int argc, char **argv)
     bool fetchReport = false;
     std::string fetchReportDetail;
 
+    // And what the launcher says when it cannot do what was asked and no job can
+    // report it: pressing B where building cannot happen, for one. Silence there is
+    // the worst possible answer, because it reads as a broken key.
+    bool notice = false;
+    std::string noticeTitle;
+    std::string noticeText;
+
     // Whether a run also cross-compiles Windows. WSL is a Linux machine running on a
     // Windows one, so there the Windows build is the one that is any use; anywhere
     // else it is this machine's own, unless the config says otherwise either way.
@@ -2008,6 +2015,53 @@ int main(int argc, char **argv)
         // A fetch that failed, said the same way a build is. A clone that cannot
         // start is over in milliseconds, so the screen it was doing that on is gone
         // before it can be read - which is what "pressing U does nothing" was.
+        // A notice: something the launcher was asked to do and cannot, with the
+        // reason. Wrapped line by line, because these carry paragraphs and a command
+        // that has to stand on a line of its own.
+        if (notice)
+        {
+            const float w = static_cast<float>(GetScreenWidth());
+            const float h = static_cast<float>(GetScreenHeight());
+            const float fs = std::max(0.8f, std::min(2.5f, std::min(w / 1280.0f, h / 720.0f)));
+            const auto px = [fs](float v) { return static_cast<int>(std::lround(v * fs)); };
+            const auto wrapLines = [&](const std::string &text, int size, float width)
+            {
+                std::vector<std::string> out;
+                size_t at = 0;
+                while (true)
+                {
+                    const size_t end = text.find('\n', at);
+                    const std::string line =
+                        text.substr(at, end == std::string::npos ? std::string::npos : end - at);
+                    const std::vector<std::string> wrapped = wrapText(line, size, width);
+                    out.insert(out.end(), wrapped.begin(), wrapped.end());
+                    if (end == std::string::npos)
+                        break;
+                    at = end + 1;
+                }
+                return out;
+            };
+
+            BeginDrawing();
+            ClearBackground((Color){12, 13, 17, 255});
+            drawCenteredLines({noticeTitle}, w * 0.5f, h * 0.5f - 130.0f * fs, px(28),
+                              (Color){240, 200, 120, 255}, 36.0f * fs);
+            drawCenteredLines(wrapLines(noticeText, px(18), w * 0.74f), w * 0.5f, h * 0.5f - 60.0f * fs, px(18),
+                              (Color){200, 208, 224, 255}, 26.0f * fs);
+            drawCenteredLines({usingController ? (pad.bottom + " closes this") : "any key closes this"}, w * 0.5f,
+                              h - 54.0f * fs, px(16), (Color){120, 130, 150, 255}, 22.0f * fs);
+            EndDrawing();
+
+            if (!screenshotPath.empty())
+            {
+                TakeScreenshot(screenshotPath.c_str());
+                std::fprintf(stderr, "[launcher] wrote %s\n", screenshotPath.c_str());
+            }
+            if (GetKeyPressed() != 0 || IsMouseButtonPressed(MOUSE_BUTTON_LEFT) ||
+                padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_DOWN) || padPressedAny(GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
+                notice = false;
+            continue;
+        }
         if (fetchReport)
         {
             const float w = static_cast<float>(GetScreenWidth());
@@ -2410,12 +2464,30 @@ int main(int argc, char **argv)
         const int gamepad = activePad;
         const bool padFetch = gamepad >= 0 && IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_LEFT);
         const bool padBuild = gamepad >= 0 && IsGamepadButtonPressed(gamepad, GAMEPAD_BUTTON_RIGHT_FACE_UP);
+        // A press that cannot be honoured says why. Doing nothing at all is what "B
+        // does nothing" was, and it reads as a broken key rather than as a missing
+        // toolchain or a source that has not been fetched.
+        const auto explain = [&](const std::string &title, const std::string &text)
+        {
+            noticeTitle = title;
+            noticeText = text;
+            notice = true;
+        };
         if (IsKeyPressed(KEY_B) || padBuild)
         {
-            if (!games[selected].portConfigured || games[selected].portLocal.empty() || !builder::supported())
-            {
-                // Nothing to build from yet: the card already says so.
-            }
+            if (!games[selected].portConfigured)
+                explain("There is nothing to build from",
+                        "This game has no port= line in launcher.ini, so the launcher does not know where its "
+                        "source is. The README's launcher.ini section has the shape of it.");
+            else if (games[selected].portLocal.empty())
+                explain("Fetch the source first",
+                        "Press U (or Square/X) to fetch this game's source. A build needs it, and the card "
+                        "says which revision is here once it has one.");
+            else if (!builder::supported())
+                explain("Building needs Linux",
+                        std::string(builder::unsupportedNote()) +
+                            "\n\nIn a terminal in this folder:\n\nwsl --cd \"" + directory +
+                            "\" ./ps2x_launcher\n\nPress B in that window.");
             // A configured disc= skips the picker entirely. Otherwise look for one and
             // say what to do when there is none, rather than opening an empty list.
             else if (!games[selected].disc.empty())

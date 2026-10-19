@@ -255,7 +255,18 @@ folder name and the release cannot disagree about which one it is.
 The Windows launcher is cross-compiled, and the script fetches llvm-mingw for it
 the same way the port's `build.sh` does. **On Windows the launcher fetches and
 plays, but does not build** — the wizard's build path is POSIX, because the Windows
-port is cross-compiled from Linux. Building there means WSL.
+port is cross-compiled from Linux and has never been built on Windows itself. Press
+`B` there and it says so, and names the way: the Windows release also carries the
+**Linux launcher**, so building is one command in a terminal in that folder:
+
+```
+wsl --cd . ./ps2x_launcher
+```
+
+Press `B` in that window. It is the same launcher, reading the same `launcher.ini`
+and the same `port/`, so what it builds is what this one plays — and under WSL it
+cross-compiles the Windows port, which is the build that is any use there. WSL needs
+cmake and a C++ toolchain inside it; the wizard names what is missing.
 
 ## Licence
 

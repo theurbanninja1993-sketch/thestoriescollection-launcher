@@ -529,9 +529,11 @@ namespace builder
 
     const char *unsupportedNote()
     {
-        return "Building is not set up on Windows yet. The Windows port is cross-compiled from Linux and has "
-               "never been built on Windows, so there is no build to drive from here. Fetching and playing "
-               "both work; see the README.";
+        return "The port is built by Linux, and this is the Windows launcher - the Windows port is "
+               "cross-compiled from Linux and has never been built on Windows itself, so there is no build to "
+               "drive from here. The Linux launcher is in this same folder for exactly this: run it in WSL and "
+               "press B there. Same launcher.ini, same port/, and the build it produces is the Windows one, "
+               "which this launcher plays. Fetching and playing work from here either way.";
     }
 
     std::string builtRunner(const std::string &portDir)

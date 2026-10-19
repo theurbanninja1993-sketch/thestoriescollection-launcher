@@ -1498,7 +1498,7 @@ int main(int argc, char **argv)
     // draws the menu is a window that stops answering - which is indistinguishable from
     // a crash, and was reported as one. So it is asked in the background, the notice
     // says it is being asked, and the answer is remembered so it is asked once.
-    enum class Wsl { Unknown, Asking, Ready, NoWsl, NoLauncher, NoRun, NoToolchain };
+    enum class Wsl { Unknown, Asking, Ready, NoWsl, NoLauncher, NoRun, NoToolchain, NoBuildTools };
 
     // The question and the answer together, in something that joins its own thread
     // however main leaves: a thread that is joinable and never joined is a terminate().
@@ -1591,6 +1591,18 @@ int main(int argc, char **argv)
             const bool runs = usable && launcher && probe(runsCommand);
             const bool cmake = usable && probe("wsl.exe -u root -e cmake --version");
             const bool compiler = usable && probe("wsl.exe -u root -e g++ --version");
+            // Everything the build needs, asked the way the build asks it. The check
+            // that was here before was blamed for a failure it had correctly predicted -
+            // the install was lying, not the check - and this is it back, exact: each of
+            // these is a command the port's own configure runs, so a "no" here is a
+            // build that would have stopped at its first step anyway.
+            const bool builder =
+                usable && probe("wsl.exe -u root -e make --version") &&
+                probe("wsl.exe -u root -e pkg-config --version") &&
+                probe("wsl.exe -u root -e pkg-config --exists libavcodec libavformat libavutil "
+                      "libswresample libswscale") &&
+                probe("wsl.exe -u root -e test -f /usr/include/X11/Xlib.h") &&
+                probe("wsl.exe -u root -e test -f /usr/include/GL/gl.h");
             // What Windows says when the feature is enabled but has not taken effect yet.
             // That is the most likely reason for a "no" straight after an install, and
             // the one thing a player can put right in a minute.
@@ -1610,6 +1622,7 @@ int main(int argc, char **argv)
                                         : !launcher           ? Wsl::NoLauncher
                                         : !runs               ? Wsl::NoRun
                                         : !(cmake && compiler) ? Wsl::NoToolchain
+                                        : !builder            ? Wsl::NoBuildTools
                                                                : Wsl::Ready);
         });
     };
@@ -1657,16 +1670,19 @@ int main(int argc, char **argv)
             break;
         case Wsl::NoRun:
         case Wsl::NoToolchain:
-            setNotice(wsl.state.load() == static_cast<int>(Wsl::NoRun) ? "The Linux launcher will not start"
-                                                                       : "WSL needs a compiler",
-                      std::string("WSL is there, but something it needs is not. The message below is what it "
-                                  "said, kept where it can be read.\n\nPress W and the launcher will install "
-                                  "cmake, a C++ toolchain, the headers a build needs and the libraries a window "
-                                  "needs, inside WSL. It needs no password: it runs as root inside WSL, which is "
-                                  "a place you already own.\n\nA build needs the *development* packages - the "
-                                  "headers - and not only the libraries a program needs to run. That is the "
-                                  "difference between a build that configures and one that stops at the first "
-                                  "step.") +
+        case Wsl::NoBuildTools:
+            setNotice(wsl.state.load() == static_cast<int>(Wsl::NoRun)
+                          ? "The Linux launcher will not start"
+                          : wsl.state.load() == static_cast<int>(Wsl::NoBuildTools)
+                                ? "WSL is missing what a build needs"
+                                : "WSL needs a compiler",
+                      std::string("A build cannot start without these, so the launcher checked before starting "
+                                  "one. The list below is what it asked and what came back - it names whichever "
+                                  "one is not there.\n\nPress W and the launcher will install everything a "
+                                  "build needs, inside WSL: the compiler, cmake, pkg-config, FFmpeg's "
+                                  "development packages, and the X11 and OpenGL headers. It needs no password: "
+                                  "it runs as root inside WSL, which is a place you already own.\n\nWhen it has "
+                                  "finished, press B again.") +
                           (wsl.noDisplay
                                ? "\n\nNote that WSL is not giving Linux a screen at all (no DISPLAY and no "
                                  "WAYLAND_DISPLAY). That is not something to install: it needs Windows 11, or "

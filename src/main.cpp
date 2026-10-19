@@ -1393,6 +1393,10 @@ int main(int argc, char **argv)
     // in its own window with the outcome left on the screen.
     enum class Offer { None, InstallWsl, InstallToolchain };
     Offer noticeOffer = Offer::None;
+    // A window that has just been started and has to be found and raised. Tried for a
+    // few seconds rather than once, because it does not exist on the first frame.
+    std::string raiseWindow;
+    float raiseWindowUntil = 0.0f;
     const auto offerScript = [](Offer which) -> std::string
     {
         if (which == Offer::InstallWsl)
@@ -1403,6 +1407,13 @@ int main(int argc, char **argv)
                    "echo Installing WSL. Windows will ask for permission first.\r\n"
                    "echo.\r\n"
                    "wsl --install\r\n"
+                   "echo.\r\n"
+                   "echo.\r\n"
+                   "echo WSL now asks for a UNIX user name and password. That account exists\r\n"
+                   "echo only inside WSL: it is not your Windows account, the launcher never\r\n"
+                   "echo needs the password, and it cannot reach anything outside WSL.\r\n"
+                   "echo.\r\n"
+                   "wsl.exe -e uname\r\n"
                    "echo.\r\n"
                    "echo If Windows says a restart is needed, restart, then press B in the\r\n"
                    "echo launcher again. If it says the option is unknown, this Windows is\r\n"
@@ -1503,10 +1514,14 @@ int main(int argc, char **argv)
             // uname answers "is there a Linux behind wsl.exe"; cmake and g++ are asked
             // directly rather than read out of a package list, because what matters is
             // whether a build can run, not how it got there.
-            const bool usable = platform::wslAvailable() && probe("wsl.exe -e uname");
+            // As root, deliberately: the first launch of a distribution asks for a UNIX
+            // user name and password, and a launcher asking that into a hidden console
+            // would sit there forever. Root needs no such account, and asking as root
+            // also means a distribution with no user set up yet still answers.
+            const bool usable = platform::wslAvailable() && probe("wsl.exe -u root -e uname");
             const bool launcher = platform::fileIsExecutable(directory + "/ps2x_launcher");
-            const bool cmake = usable && probe("wsl.exe -e cmake --version");
-            const bool compiler = usable && probe("wsl.exe -e g++ --version");
+            const bool cmake = usable && probe("wsl.exe -u root -e cmake --version");
+            const bool compiler = usable && probe("wsl.exe -u root -e g++ --version");
             // What Windows says when the feature is enabled but has not taken effect yet.
             // That is the most likely reason for a "no" straight after an install, and
             // the one thing a player can put right in a minute.
@@ -1585,6 +1600,10 @@ int main(int argc, char **argv)
             }
             const bool started = platform::runDetached("wsl.exe", arguments);
             std::fprintf(stderr, "[launcher] %s wsl.exe\n", started ? "started" : "could not start");
+            // Out of the way, because the window that matters from here is the one that
+            // just opened: it holds the build's confirmation and then its progress.
+            if (started)
+                MinimizeWindow();
             setNotice(started ? "Building in WSL" : "Could not start WSL",
                       started ? ("A build window has opened. Press Start in it. It builds the Windows port, "
                                  "and this launcher plays it.\n\nIf no window appeared, WSL could not start "
@@ -2260,6 +2279,15 @@ int main(int argc, char **argv)
         // A notice: something the launcher was asked to do and cannot, with the
         // reason. Wrapped line by line, because these carry paragraphs and a command
         // that has to stand on a line of its own.
+        // A window this launcher started, found and raised. It is where an install
+        // asks for a UNIX user name and password, and a prompt behind the launcher is a
+        // prompt nobody can answer. Retried because it does not exist on the first frame.
+        if (!raiseWindow.empty() && GetTime() < raiseWindowUntil)
+        {
+            if (platform::bringToFront(raiseWindow))
+                raiseWindow.clear();
+        }
+
         // The answer arrived while the notice was waiting for it: say what it means.
         if (noticeBusy && wsl.state.load() != static_cast<int>(Wsl::Asking))
             showWslOutcome();
@@ -2332,6 +2360,12 @@ int main(int argc, char **argv)
                 out.close();
                 const bool started = written && platform::runInWindow(script, which == Offer::InstallWsl);
                 std::fprintf(stderr, "[launcher] %s %s\n", started ? "offered" : "could not run", script.c_str());
+                if (started)
+                {
+                    raiseWindow = which == Offer::InstallWsl ? "Installing WSL"
+                                                            : "Installing the C++ toolchain inside WSL";
+                    raiseWindowUntil = GetTime() + 20.0f;
+                }
                 // Out of the way, and not merely polite: this install reports its own
                 // progress, and a full screen launcher in front of the window is exactly
                 // why none of it could be seen. A bar drawn here would be a guess - the
@@ -2340,10 +2374,11 @@ int main(int argc, char **argv)
                     MinimizeWindow();
                 noticeTitle = started ? "Running that for you" : "Could not run that";
                 noticeText = started
-                                 ? ("The launcher has got out of the way. Look for the window it opened - "
-                                    "Windows may ask for permission first, and the window has the progress in "
-                                    "it, and stays open when it finishes.\n\nWhen it is done, come back here "
-                                    "and press B - the launcher works the rest out from what is there.")
+                                 ? ("The launcher has got out of the way and brought that window to the front. "
+                                    "It has the progress in it, it stays open when it finishes, and WSL will "
+                                    "ask for a UNIX user name and password - an account that exists only inside "
+                                    "WSL.\n\nWhen it is done, come back here and press B - the launcher works "
+                                    "the rest out from what is there.")
                                  : ("The launcher could not start it. What it would have run is written to:\n\n" +
                                     script);
                 notice = true;

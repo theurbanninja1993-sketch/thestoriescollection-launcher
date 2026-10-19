@@ -85,6 +85,12 @@ namespace platform
     // toolchain - which take minutes and whose output is the point.
     bool runInWindow(const std::string &scriptPath, bool elevated);
 
+    // Raises a window this program started, found by its title, above everything else.
+    // Needed because one of these installs asks for a UNIX user name and password, and
+    // a prompt behind a full screen launcher is a prompt nobody can answer. False when
+    // the window is not there yet, which is why the caller retries.
+    bool bringToFront(const std::string &title);
+
 
     // Real pixels instead of a DPI-scaled window, which is what makes the layout
     // the size it thinks it is on a display at 125% or 150%. A no-op away from

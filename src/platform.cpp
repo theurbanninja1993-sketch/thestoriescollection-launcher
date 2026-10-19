@@ -258,6 +258,23 @@ namespace platform
 #endif
     }
 
+    bool bringToFront(const std::string &title)
+    {
+        if (title.empty())
+            return false;
+#if defined(_WIN32)
+        const std::wstring wide(title.begin(), title.end());
+        HWND window = FindWindowW(nullptr, wide.c_str());
+        if (window == nullptr)
+            return false; // not created yet, or not ours
+        ShowWindow(window, SW_RESTORE);
+        SetForegroundWindow(window);
+        return true;
+#else
+        return false;
+#endif
+    }
+
     bool runScriptDetached(const std::string &scriptPath)
     {
         if (scriptPath.empty())

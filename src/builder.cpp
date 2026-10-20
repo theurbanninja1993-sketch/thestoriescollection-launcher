@@ -914,13 +914,16 @@ namespace builder
 
                 // The pass exits on the manifest's frame count; the timeout is only there
                 // in case a game never reaches it.
-                std::vector<std::string> learner = {runner, bootPath};
-                if (fs::exists("/usr/bin/timeout", ec))
-                    learner = {"/usr/bin/timeout", "400", runner, bootPath};
                 // A private X server, when the xvfb package is installed: the game then talks to
-                // that instead of the desktop, which is where a display can refuse the visual.
-                if (virtualDisplay && fs::exists("/usr/bin/xvfb-run", ec))
-                    learner.insert(learner.begin(), {"xvfb-run", "-a"});
+                // that instead of the desktop, which is where a display can refuse the visual. It is
+                // software rendering, so the pass gets longer. The timeout wraps the whole thing: an
+                // X server that never starts once held a build on this step for hours.
+                const bool useVirtual = virtualDisplay && fs::exists("/usr/bin/xvfb-run", ec);
+                std::vector<std::string> learner = {runner, bootPath};
+                if (useVirtual)
+                    learner = {"xvfb-run", "-a", runner, bootPath};
+                if (fs::exists("/usr/bin/timeout", ec))
+                    learner.insert(learner.begin(), {"/usr/bin/timeout", useVirtual ? "1800" : "400"});
                 return runTool(learner, learn, environment, cb.onLine, pid);
             };
             auto collectCaptures = [&]()

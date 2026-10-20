@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -13,6 +15,7 @@
 #include <thread>
 
 #if !defined(_WIN32)
+#include <poll.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -103,7 +106,8 @@ namespace builder
         }
 
         int runTool(const std::vector<std::string> &argv, const std::string &cwd,
-                    const std::vector<std::string> &environment, OnLine onLine, std::atomic<int> &childPid)
+                    const std::vector<std::string> &environment, OnLine onLine, std::atomic<int> &childPid,
+                    int limitSeconds)
         {
             if (argv.empty())
                 return -1;
@@ -172,27 +176,81 @@ namespace builder
             childPid = static_cast<int>(pid);
             close(fds[1]);
 
-            FILE *stream = fdopen(fds[0], "r");
-            if (stream != nullptr)
+            // Read to the child's exit, not to the pipe's end: a helper it started (an X server)
+            // can keep the pipe open after the child is gone, and a blocking read then never
+            // returns. The limit kills the whole group when it runs out.
+            const auto started = std::chrono::steady_clock::now();
+            std::string pending;
+            int status = 0;
+            bool exited = false, eof = false;
+            std::chrono::steady_clock::time_point exitedAt{};
+            auto emitLines = [&]()
             {
-                char line[4096];
-                while (std::fgets(line, sizeof line, stream) != nullptr)
+                size_t nl;
+                while ((nl = pending.find('\n')) != std::string::npos)
                 {
-                    const std::string text = trim(line);
+                    const std::string text = trim(pending.substr(0, nl));
+                    pending.erase(0, nl + 1);
                     if (!text.empty() && onLine)
                         onLine(text);
                 }
-                fclose(stream);
+            };
+            for (;;)
+            {
+                if (!exited && waitpid(pid, &status, WNOHANG) == pid)
+                {
+                    exited = true;
+                    exitedAt = std::chrono::steady_clock::now();
+                }
+                if (!exited && limitSeconds > 0 && std::chrono::steady_clock::now() - started > std::chrono::seconds(limitSeconds))
+                {
+                    kill(-pid, SIGKILL);
+                    waitpid(pid, &status, 0);
+                    exited = true;
+                    exitedAt = std::chrono::steady_clock::now();
+                }
+                if (exited && (eof || std::chrono::steady_clock::now() - exitedAt > std::chrono::seconds(2)))
+                    break;
+                if (eof)
+                {
+                    poll(nullptr, 0, 200);
+                    continue;
+                }
+                pollfd pfd{fds[0], POLLIN, 0};
+                const int ready = poll(&pfd, 1, 200);
+                if (ready > 0)
+                {
+                    char buf[4096];
+                    const ssize_t n = read(fds[0], buf, sizeof buf);
+                    if (n > 0)
+                    {
+                        pending.append(buf, static_cast<size_t>(n));
+                        emitLines();
+                    }
+                    else if (n == 0)
+                        eof = true;
+                    else if (errno != EINTR)
+                        eof = true;
+                }
             }
-
-            int status = 0;
-            waitpid(pid, &status, 0);
+            close(fds[0]);
+            emitLines();
+            if (exited)
+                kill(-pid, SIGKILL); // a helper it left behind (an X server) is not wanted after the step
+            if (!pending.empty())
+            {
+                const std::string text = trim(pending);
+                if (!text.empty() && onLine)
+                    onLine(text);
+            }
+            if (!exited)
+                waitpid(pid, &status, 0);
             childPid = 0;
             return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
         }
 #else
         int runTool(const std::vector<std::string> &, const std::string &, const std::vector<std::string> &, OnLine,
-                    std::atomic<int> &)
+                    std::atomic<int> &, int)
         {
             return -1; // there is no Windows build to drive yet; see supported()
         }
@@ -212,7 +270,7 @@ namespace builder
                                if (onLine)
                                    onLine(line);
                            },
-                           childPid);
+                           childPid, 0);
         }
 
         // The hash out of ps2x_iso: "    boot hash: <hash>" from a disc, or
@@ -615,7 +673,7 @@ namespace builder
             return cb.keepGoing == nullptr || cb.keepGoing();
         };
         auto shell = [&](const std::vector<std::string> &argv, const std::string &cwd) -> int
-        { return runTool(argv, cwd, {}, cb.onLine, pid); };
+        { return runTool(argv, cwd, {}, cb.onLine, pid, 0); };
 
         // Every step that can fail says what failed. This line is what the player
         // ends up reading on the build-ended screen, and "nothing was reported"
@@ -924,7 +982,8 @@ namespace builder
                     learner = {"xvfb-run", "-a", runner, bootPath};
                 if (fs::exists("/usr/bin/timeout", ec))
                     learner.insert(learner.begin(), {"/usr/bin/timeout", useVirtual ? "1800" : "400"});
-                return runTool(learner, learn, environment, cb.onLine, pid);
+                // The timeout above is the normal limit; this is the backstop if it never ends the tree.
+                return runTool(learner, learn, environment, cb.onLine, pid, (useVirtual ? 1800 : 400) + 60);
             };
             auto collectCaptures = [&]()
             {

@@ -23,6 +23,7 @@
 #include <atomic>
 #include <cctype>
 #include <cmath>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1976,11 +1977,16 @@ int main(int argc, char **argv)
         std::fprintf(stderr, "[launcher] building %s from %s\n", games[index].id.c_str(), image.c_str());
         jobThread = std::thread([&, index, image, log]
         {
+            const auto started = std::chrono::steady_clock::now();
             const auto write = [&](const char *prefix, const std::string &text)
             {
                 if (log != nullptr)
                 {
-                    std::fprintf(log, "%s%s\n", prefix, text.c_str());
+                    // Elapsed time since the build started, so each stage's length can be read off the log.
+                    const long long seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                                                  std::chrono::steady_clock::now() - started).count();
+                    std::fprintf(log, "[%lld:%02lld:%02lld] %s%s\n", seconds / 3600, (seconds / 60) % 60, seconds % 60,
+                                 prefix, text.c_str());
                     std::fflush(log);
                 }
             };

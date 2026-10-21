@@ -2,6 +2,11 @@
 
 #include "platform.h"
 
+#if defined(_WIN32)
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -12,6 +17,9 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <atomic>
+#include <map>
+#include <mutex>
 #include <thread>
 
 #if !defined(_WIN32)
@@ -249,10 +257,217 @@ namespace builder
             return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
         }
 #else
-        int runTool(const std::vector<std::string> &, const std::string &, const std::vector<std::string> &, OnLine,
-                    std::atomic<int> &, int)
+        // Windows: a job object holds every process a step starts, so one TerminateJobObject
+        // takes the whole tree - the compiler, the game, anything they launched - as the
+        // process group does on Linux. The output is read on its own thread, and the wait
+        // for the child is on this one, so the limit still applies while a helper holds
+        // the pipe open.
+        std::mutex jobMutex;
+        std::map<int, HANDLE> jobsByPid;
+
+        std::string quoteArgument(const std::string &arg)
         {
-            return -1; // there is no Windows build to drive yet; see supported()
+            // The rules the C runtime uses to split a command line back into arguments.
+            if (!arg.empty() && arg.find_first_of(" \t\"") == std::string::npos)
+                return arg;
+            std::string out = "\"";
+            size_t backslashes = 0;
+            for (const char c : arg)
+            {
+                if (c == '\\')
+                    ++backslashes;
+                else if (c == '"')
+                {
+                    out.append(backslashes * 2 + 1, '\\');
+                    out.push_back('"');
+                    backslashes = 0;
+                }
+                else
+                {
+                    out.append(backslashes, '\\');
+                    out.push_back(c);
+                    backslashes = 0;
+                }
+            }
+            out.append(backslashes * 2, '\\');
+            out.push_back('"');
+            return out;
+        }
+
+        // This process's environment with the caller's entries replacing any of the same name,
+        // as the block CreateProcess takes: NUL-separated, ending in an empty entry.
+        std::string environmentBlock(const std::vector<std::string> &overrides)
+        {
+            std::vector<std::string> entries;
+            if (char *current = GetEnvironmentStringsA())
+            {
+                for (const char *p = current; *p != '\0'; p += std::strlen(p) + 1)
+                    entries.push_back(p);
+                FreeEnvironmentStringsA(current);
+            }
+            auto keyOf = [](const std::string &entry)
+            { return entry.substr(0, entry.find('=', 1)); };
+            std::vector<std::string> merged;
+            for (const std::string &entry : entries)
+            {
+                const std::string key = keyOf(entry);
+                bool replaced = false;
+                for (const std::string &over : overrides)
+                    if (_stricmp(keyOf(over).c_str(), key.c_str()) == 0)
+                        replaced = true;
+                if (!replaced)
+                    merged.push_back(entry);
+            }
+            merged.insert(merged.end(), overrides.begin(), overrides.end());
+            std::string block;
+            for (const std::string &entry : merged)
+            {
+                block += entry;
+                block.push_back('\0');
+            }
+            block.push_back('\0');
+            return block;
+        }
+
+        int runTool(const std::vector<std::string> &argv, const std::string &cwd,
+                    const std::vector<std::string> &environment, OnLine onLine, std::atomic<int> &childPid,
+                    int limitSeconds)
+        {
+            if (argv.empty())
+                return -1;
+
+            SECURITY_ATTRIBUTES inherit{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+            HANDLE readEnd = nullptr, writeEnd = nullptr;
+            if (!CreatePipe(&readEnd, &writeEnd, &inherit, 0))
+                return -1;
+            SetHandleInformation(readEnd, HANDLE_FLAG_INHERIT, 0);
+            HANDLE nul = CreateFileA("NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &inherit,
+                                     OPEN_EXISTING, 0, nullptr);
+
+            std::string commandLine;
+            for (size_t i = 0; i < argv.size(); ++i)
+            {
+                if (i > 0)
+                    commandLine.push_back(' ');
+                commandLine += quoteArgument(argv[i]);
+            }
+
+            HANDLE job = CreateJobObjectA(nullptr, nullptr);
+            if (job != nullptr)
+            {
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+                limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof limits);
+            }
+
+            const std::string block = environmentBlock(environment);
+            STARTUPINFOA startup{};
+            startup.cb = sizeof startup;
+            startup.dwFlags = STARTF_USESTDHANDLES;
+            startup.hStdInput = nul;
+            startup.hStdOutput = writeEnd;
+            startup.hStdError = writeEnd;
+            PROCESS_INFORMATION process{};
+            std::vector<char> line(commandLine.begin(), commandLine.end());
+            line.push_back('\0');
+            // Suspended, so the job has it before it can start anything of its own.
+            const BOOL started = CreateProcessA(nullptr, line.data(), nullptr, nullptr, TRUE,
+                                                CREATE_SUSPENDED | CREATE_NO_WINDOW, const_cast<char *>(block.data()),
+                                                cwd.empty() ? nullptr : cwd.c_str(), &startup, &process);
+            const DWORD error = GetLastError();
+            if (nul != nullptr)
+                CloseHandle(nul);
+            CloseHandle(writeEnd);
+            if (!started)
+            {
+                CloseHandle(readEnd);
+                if (job != nullptr)
+                    CloseHandle(job);
+                if (onLine)
+                    onLine("could not start " + argv[0] + " (Windows error " + std::to_string(error) + ")");
+                return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? 127 : 126;
+            }
+            if (job != nullptr)
+                AssignProcessToJobObject(job, process.hProcess);
+            ResumeThread(process.hThread);
+            CloseHandle(process.hThread);
+            childPid = static_cast<int>(process.dwProcessId);
+            if (job != nullptr)
+            {
+                std::lock_guard<std::mutex> lock(jobMutex);
+                jobsByPid[childPid] = job;
+            }
+
+            // Output ends once nothing holds the pipe. The reader stops when that is so, or
+            // when the step has ended and nothing is left to read.
+            std::atomic<bool> stepEnded{false};
+            std::thread reader([readEnd, onLine, &stepEnded]()
+            {
+                std::string pending;
+                char buffer[4096];
+                auto emitLines = [&]()
+                {
+                    size_t nl;
+                    while ((nl = pending.find('\n')) != std::string::npos)
+                    {
+                        const std::string text = trim(pending.substr(0, nl));
+                        pending.erase(0, nl + 1);
+                        if (!text.empty() && onLine)
+                            onLine(text);
+                    }
+                };
+                for (;;)
+                {
+                    DWORD available = 0;
+                    if (!PeekNamedPipe(readEnd, nullptr, 0, nullptr, &available, nullptr))
+                        break; // the write ends are all closed
+                    if (available == 0)
+                    {
+                        if (stepEnded.load())
+                            break;
+                        Sleep(50);
+                        continue;
+                    }
+                    DWORD n = 0;
+                    if (!ReadFile(readEnd, buffer, sizeof buffer, &n, nullptr) || n == 0)
+                        break;
+                    pending.append(buffer, n);
+                    emitLines();
+                }
+                const std::string text = trim(pending);
+                if (!text.empty() && onLine)
+                    onLine(text);
+            });
+
+            bool killed = false;
+            const DWORD waitMs = limitSeconds > 0 ? static_cast<DWORD>(limitSeconds) * 1000u : INFINITE;
+            if (WaitForSingleObject(process.hProcess, waitMs) == WAIT_TIMEOUT)
+            {
+                killed = true;
+                if (job != nullptr)
+                    TerminateJobObject(job, 1);
+                else
+                    TerminateProcess(process.hProcess, 1);
+                WaitForSingleObject(process.hProcess, INFINITE);
+            }
+            DWORD code = 1;
+            GetExitCodeProcess(process.hProcess, &code);
+            // Whatever it left running (a helper, an X server) is not wanted after the step.
+            if (job != nullptr)
+                TerminateJobObject(job, 1);
+            stepEnded.store(true);
+            reader.join();
+
+            CloseHandle(readEnd);
+            CloseHandle(process.hProcess);
+            if (job != nullptr)
+            {
+                std::lock_guard<std::mutex> lock(jobMutex);
+                jobsByPid.erase(childPid);
+                CloseHandle(job);
+            }
+            childPid = 0;
+            return killed ? -1 : static_cast<int>(code);
         }
 #endif
 
@@ -586,7 +801,7 @@ namespace builder
     bool supported()
     {
 #if defined(_WIN32)
-        return false;
+        return false; // not yet: the Windows steps still assume Linux (see StepTools)
 #else
         return true;
 #endif
@@ -1163,7 +1378,12 @@ namespace builder
         const int pid = childPid.load();
         if (pid <= 0)
             return;
-#if !defined(_WIN32)
+#if defined(_WIN32)
+        std::lock_guard<std::mutex> lock(jobMutex);
+        const auto found = jobsByPid.find(pid);
+        if (found != jobsByPid.end())
+            TerminateJobObject(found->second, 1);
+#else
         kill(-pid, SIGTERM);
         kill(pid, SIGTERM);
 #endif

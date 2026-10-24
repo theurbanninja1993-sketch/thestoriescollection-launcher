@@ -990,6 +990,19 @@ int main(int argc, char **argv)
 
     Settings settings;
     std::vector<Game> games = loadGames(configPath, settings);
+    for (Game &game : games)
+    {
+        // Both Stories games build from the same source now. A card with no source
+        // and no exe of its own - the "coming soon" LCS card of a launcher.ini from
+        // before, which an update keeps - gets that source and becomes playable.
+        if (game.portUrl.empty() && game.exe.empty() && (game.id == "lcs" || game.id == "vcs"))
+        {
+            game.portUrl = "https://github.com/theurbanninja1993-sketch/vcs-recomp.git";
+            if (game.portRef.empty())
+                game.portRef = "release";
+            game.available = true;
+        }
+    }
     if (games.empty())
     {
         std::fprintf(stderr, "[launcher] no games configured in %s\n", configPath.c_str());

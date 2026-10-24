@@ -1304,6 +1304,17 @@ namespace builder
             // off the desktop. Some graphics stacks refuse a hidden window (GLXBadFBConfig
             // under WSL), and then nothing is recorded, so a pass that records nothing is run
             // once more with a visible window before the build gives up.
+            // Linux helpers. Never on Windows, where Wine's view of / would otherwise
+            // find the Linux machine's copies and hand the game to them.
+            auto hostHas = [&](const char *path)
+            {
+#if defined(_WIN32)
+                (void)path;
+                return false;
+#else
+                return fs::exists(path, ec);
+#endif
+            };
             auto learnPass = [&](bool hidden, bool virtualDisplay) -> int
             {
                 std::vector<std::string> environment = {"PS2X_NO_LAUNCH_MENU=1",
@@ -1324,11 +1335,11 @@ namespace builder
                 // that instead of the desktop, which is where a display can refuse the visual. It is
                 // software rendering, so the pass gets longer. The timeout wraps the whole thing: an
                 // X server that never starts once held a build on this step for hours.
-                const bool useVirtual = virtualDisplay && fs::exists("/usr/bin/xvfb-run", ec);
+                const bool useVirtual = virtualDisplay && hostHas("/usr/bin/xvfb-run");
                 std::vector<std::string> learner = {runner, bootPath};
                 if (useVirtual)
                     learner = {"xvfb-run", "-a", runner, bootPath};
-                if (fs::exists("/usr/bin/timeout", ec))
+                if (hostHas("/usr/bin/timeout"))
                     learner.insert(learner.begin(), {"/usr/bin/timeout", useVirtual ? "1800" : "400"});
                 // The timeout above is the normal limit; this is the backstop if it never ends the tree.
 #if defined(_WIN32)
@@ -1364,7 +1375,7 @@ namespace builder
                     cb.onLine("that visible pass ended early too");
                 captures = collectCaptures();
             }
-            if (captures.empty() && fs::exists("/usr/bin/xvfb-run", ec))
+            if (captures.empty() && hostHas("/usr/bin/xvfb-run"))
             {
                 if (cb.onLine)
                     cb.onLine("still nothing; running it once more under a private virtual display");

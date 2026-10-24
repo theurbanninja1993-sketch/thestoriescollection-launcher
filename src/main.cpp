@@ -2461,9 +2461,16 @@ int main(int argc, char **argv)
                           std::ostringstream whole;
                           whole << buildLog.rdbuf();
                           const std::string said = whole.str();
-                          if (said.find("Could NOT find") != std::string::npos ||
+                          // Linux only: on Windows the build brings its own compiler and
+                          // libraries, so there is nothing to install, and the plain report
+                          // (with the log) is the right answer.
+                          bool linuxHost = true;
+#if defined(PS2X_LAUNCHER_WINDOWS)
+                          linuxHost = false;
+#endif
+                          if (linuxHost && (said.find("Could NOT find") != std::string::npos ||
                               said.find("missing:") != std::string::npos ||
-                              said.find("cannot find -l") != std::string::npos)
+                              said.find("cannot find -l") != std::string::npos))
                           {
                               buildReport = false;
                               setNotice("The build is missing something to build with",

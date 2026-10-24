@@ -539,7 +539,11 @@ namespace builder
                     const size_t eq = body.find('=');
                     if (eq == std::string::npos || !trim(body.substr(key.size(), eq - key.size())).empty())
                         continue;
-                    result << key << " = \"" << pair.second.first << "\"\n";
+                    // Forward slashes, which Windows takes as well: in a TOML string a
+                    // backslash starts an escape, and C:\port\games is not a valid one.
+                    std::string value = pair.second.first;
+                    std::replace(value.begin(), value.end(), '\\', '/');
+                    result << key << " = \"" << value << "\"\n";
                     *pair.second.second = true;
                     replaced = true;
                     break;
@@ -720,7 +724,11 @@ namespace builder
         switch (step)
         {
         case StepTools: return "Tools";
+#if defined(_WIN32)
+        case StepToolchain: return "Compiler";
+#else
         case StepToolchain: return "Windows cross-compiler";
+#endif
         case StepCheck: return "Check the disc";
         case StepExtract: return "Extract";
         case StepRecompile: return "Recompile";
@@ -738,7 +746,12 @@ namespace builder
         {
         case StepTools: return "The first three stages call tools that a fresh download does not have yet.";
         case StepToolchain:
+#if defined(_WIN32)
+            return "A compiler, CMake and Ninja, fetched once (about 200 MB) into port\\toolchains. Nothing is "
+                   "installed on the system, and the next build reuses them.";
+#else
             return "llvm-mingw, fetched once (88 MB). The Windows build is cross-compiled, so its compiler runs here.";
+#endif
         case StepCheck: return "The disc's own boot file is hashed and compared with the one the source expects.";
         case StepExtract: return "Every file is pulled off the disc. This is the long one.";
         case StepRecompile: return "The game's ELF becomes C++, which is what the port is: a translation of it.";
@@ -758,6 +771,11 @@ namespace builder
         // Measured on the machine this was written on: the tools 161 s, the port's
         // own compile 426 s, and the two VU1 passes about 800 s.
         const bool folder = fs::is_directory(image, ec);
+#if defined(_WIN32)
+        // Built here, natively: one compile and the passes, with no cross-compile after.
+        (void)windows;
+        return 4 + (folder ? 0 : 17) + 10 + 14;
+#endif
         int minutes = 3;             // configuring and building the tools
         if (windows)
             minutes += 3;            // llvm-mingw, first time only
@@ -772,6 +790,11 @@ namespace builder
 
     std::vector<int> plan(bool windows)
     {
+#if defined(_WIN32)
+        // The compiler first, because on Windows the tools are built with it too.
+        (void)windows;
+        return {StepToolchain, StepTools, StepCheck, StepExtract, StepRecompile, StepInstall, StepCompile, StepVu1};
+#endif
         std::vector<int> steps = {StepTools};
         if (windows)
             steps.push_back(StepToolchain);
@@ -798,22 +821,11 @@ namespace builder
 
     std::string windowsOutDir(const std::string &portDir) { return join(portDir, "dist/windows"); }
 
-    bool supported()
-    {
-#if defined(_WIN32)
-        return false; // not yet: the Windows steps still assume Linux (see StepTools)
-#else
-        return true;
-#endif
-    }
+    bool supported() { return true; }
 
     const char *unsupportedNote()
     {
-        return "The port is built by Linux, and this is the Windows launcher - the Windows port is "
-               "cross-compiled from Linux and has never been built on Windows itself, so there is no build to "
-               "drive from here. The Linux launcher is in this same folder for exactly this: run it in WSL and "
-               "press B there. Same launcher.ini, same port/, and the build it produces is the Windows one, "
-               "which this launcher plays. Fetching and playing work from here either way.";
+        return "This launcher cannot build the port on this machine.";
     }
 
     std::string builtRunner(const std::string &portDir)
@@ -836,10 +848,15 @@ namespace builder
         const std::string generated = join(work, "generated");
         const std::string learn = join(work, "vu1_learn");
         const std::string vu1Dir = join(work, "vu1");
-        const std::string ps2Recomp = join(buildDir, "ps2xRecomp/ps2_recomp");
-        const std::string ps2Iso = join(buildDir, "ps2xBuilder/ps2x_iso");
-        const std::string vu1Recomp = join(buildDir, "ps2xRuntime/vu1_recomp");
-        const std::string runner = builtRunner(portDir);
+#if defined(_WIN32)
+        const std::string exe = ".exe";
+#else
+        const std::string exe;
+#endif
+        const std::string ps2Recomp = join(buildDir, "ps2xRecomp/ps2_recomp") + exe;
+        const std::string ps2Iso = join(buildDir, "ps2xBuilder/ps2x_iso") + exe;
+        const std::string vu1Recomp = join(buildDir, "ps2xRuntime/vu1_recomp") + exe;
+        const std::string runner = builtRunner(portDir) + exe;
         const std::string bootPath = join(discDir, recipe.bootFile);
 
         std::atomic<int> owned{0};
@@ -909,17 +926,130 @@ namespace builder
             return false;
         };
 
+        // How the port is configured. The studio, the tests and the analyzer are
+        // developer tools nothing here runs, and leaving them out saves fetching and
+        // building their dependencies. Older sources ignore the switches.
+        std::string cmake = "cmake";
+        std::vector<std::string> hostFlags = {"-DCMAKE_BUILD_TYPE=Release", "-DPS2X_BUILD_STUDIO=OFF",
+                                              "-DPS2X_BUILD_TEST=OFF", "-DPS2X_BUILD_ANALYZER=OFF"};
+        auto configureArgs = [&](const std::vector<std::string> &extra)
+        {
+            std::vector<std::string> argv = {cmake, "-S", portDir, "-B", buildDir};
+            argv.insert(argv.end(), hostFlags.begin(), hostFlags.end());
+            argv.insert(argv.end(), extra.begin(), extra.end());
+            return argv;
+        };
+
+#if defined(_WIN32)
+        // ------------------------------------------------- toolchain (Windows)
+        // Built natively: a compiler, CMake and Ninja, each fetched once into a folder
+        // beside the sources rather than inside them, because fetching a source wipes
+        // its folder and these are the same for every game. curl and tar ship with
+        // Windows 10 and 11, so there is nothing to install and no WSL.
+        if (!step(StepToolchain))
+            return false;
+        {
+            const std::string toolchains = join(fs::path(portDir).parent_path().generic_string(), "toolchains");
+            fs::create_directories(toolchains, ec);
+            struct Tool
+            {
+                const char *what, *url, *archive, *into, *probe;
+            };
+            const Tool tools[] = {
+                {"the compiler (llvm-mingw, 150 MB)",
+                 "https://github.com/mstorsjo/llvm-mingw/releases/download/20241217/llvm-mingw-20241217-ucrt-x86_64.zip",
+                 "llvm-mingw-20241217-ucrt-x86_64.zip", "", "llvm-mingw-20241217-ucrt-x86_64/bin/x86_64-w64-mingw32-clang++.exe"},
+                {"CMake (45 MB)",
+                 "https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-windows-x86_64.zip",
+                 "cmake-3.31.6-windows-x86_64.zip", "", "cmake-3.31.6-windows-x86_64/bin/cmake.exe"},
+                {"Ninja", "https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip",
+                 "ninja-1.12.1-win.zip", "ninja-1.12.1", "ninja-1.12.1/ninja.exe"},
+            };
+            for (const Tool &tool : tools)
+            {
+                if (fs::exists(join(toolchains, tool.probe), ec))
+                    continue;
+                const std::string archive = join(toolchains, tool.archive);
+                // Downloaded under another name and renamed once whole, so a download that
+                // was stopped is never mistaken for a finished one.
+                if (!fs::exists(archive, ec))
+                {
+                    if (cb.onLine)
+                        cb.onLine(std::string("fetching ") + tool.what + ", once");
+                    const std::string partial = archive + ".part";
+                    fs::remove(partial, ec);
+                    if (shell({"curl", "-fL", "--retry", "3", "-o", partial, tool.url}, "") != 0)
+                    {
+                        if (cb.onLine)
+                            cb.onLine(std::string("could not download ") + tool.what +
+                                      " - check the connection, then press B again");
+                        return false;
+                    }
+                    fs::rename(partial, archive, ec);
+                }
+                if (cb.onLine)
+                    cb.onLine(std::string("unpacking ") + tool.what);
+                const std::string into = join(toolchains, tool.into);
+                fs::create_directories(into, ec);
+                // Windows' own tar, by its full name: the MSYS tar a Git install puts on PATH
+                // reads no zips, and takes the C: in a path for a remote host.
+                std::string tar = "tar";
+                if (const char *root = std::getenv("SystemRoot"))
+                    if (fs::exists(std::string(root) + "\\System32\\tar.exe", ec))
+                        tar = std::string(root) + "\\System32\\tar.exe";
+                int status = shell({tar, "-xf", archive, "-C", into}, "");
+                if (status != 0)
+                    status = shell({"powershell", "-NoProfile", "-Command",
+                                    "Expand-Archive -Force -LiteralPath '" + archive + "' -DestinationPath '" + into +
+                                        "'"},
+                                   "");
+                if (status != 0 || !fs::exists(join(toolchains, tool.probe), ec))
+                {
+                    // A damaged download is the likely reason, so it goes and the next try fetches it again.
+                    fs::remove(archive, ec);
+                    return failed(std::string("unpacking ") + tool.what, status);
+                }
+                fs::remove(archive, ec);
+            }
+
+            const std::string llvm = join(toolchains, "llvm-mingw-20241217-ucrt-x86_64/bin");
+            cmake = join(toolchains, "cmake-3.31.6-windows-x86_64/bin/cmake.exe");
+            hostFlags.insert(hostFlags.begin(),
+                             {"-G", "Ninja", "-DCMAKE_MAKE_PROGRAM=" + join(toolchains, "ninja-1.12.1/ninja.exe"),
+                              "-DCMAKE_C_COMPILER=" + join(llvm, "x86_64-w64-mingw32-clang.exe"),
+                              "-DCMAKE_CXX_COMPILER=" + join(llvm, "x86_64-w64-mingw32-clang++.exe"),
+                              "-DCMAKE_RC_COMPILER=" + join(llvm, "x86_64-w64-mingw32-windres.exe"),
+                              // Self-contained: no libc++ or unwinder DLLs to carry around.
+                              "-DCMAKE_EXE_LINKER_FLAGS=-static"});
+            if (cb.onLine)
+                cb.onLine("compiler: " + llvm);
+
+            // A build folder another configure made - WSL's, from before the launcher
+            // built natively - names a different generator and compiler, and CMake
+            // refuses to reuse it. Its cache goes; the disc it extracted stays.
+            const std::string cache = readFile(join(buildDir, "CMakeCache.txt"));
+            if (!cache.empty() && (cache.find("CMAKE_GENERATOR:INTERNAL=Ninja") == std::string::npos ||
+                                   cache.find("x86_64-w64-mingw32-clang++.exe") == std::string::npos))
+            {
+                if (cb.onLine)
+                    cb.onLine("starting the build folder again: another kind of build made it");
+                fs::remove(join(buildDir, "CMakeCache.txt"), ec);
+                fs::remove_all(join(buildDir, "CMakeFiles"), ec);
+            }
+        }
+#endif
+
         // ---------------------------------------------------------------- tools
         if (!step(StepTools))
             return false;
         fs::create_directories(buildDir, ec);
         {
-            const int status = shell({"cmake", "-S", portDir, "-B", buildDir, "-DCMAKE_BUILD_TYPE=Release"}, "");
+            const int status = shell(configureArgs({}), "");
             if (status != 0)
                 return failed(status == 127 ? "cmake" : "configuring the build", status);
         }
         {
-            std::vector<std::string> argv = {"cmake", "--build", buildDir, "--target",
+            std::vector<std::string> argv = {cmake, "--build", buildDir, "--target",
                                              "ps2_recomp", "ps2x_iso", "vu1_recomp", "-j", std::to_string(cores())};
             const int status = shell(argv, "");
             if (status != 0)
@@ -974,7 +1104,11 @@ namespace builder
         // is fetched once into the source and reused. Anything already on this machine
         // wins over fetching: one named, one the environment points at, the one an
         // existing build-win was configured with, then our own copy.
+#if defined(_WIN32)
+        const bool cross = false; // this machine's own build is the Windows one
+#else
         const bool cross = targets.windows;
+#endif
         std::string toolchainRoot = targets.toolchain;
         if (cross)
         {
@@ -1133,14 +1267,13 @@ namespace builder
         if (!step(StepCompile))
             return false;
         {
-            std::vector<std::string> configure = {"cmake", "-S", portDir, "-B", buildDir, "-DCMAKE_BUILD_TYPE=Release",
-                                                  "-DPS2X_VU1_PROGRAMS=" + vu1Dir};
+            std::vector<std::string> configure = configureArgs({"-DPS2X_VU1_PROGRAMS=" + vu1Dir});
             {
                 const int status = shell(configure, "");
                 if (status != 0)
                     return failed("configuring the port", status);
             }
-            std::vector<std::string> build = {"cmake", "--build", buildDir, "--target", "ps2EntryRunner", "-j",
+            std::vector<std::string> build = {cmake, "--build", buildDir, "--target", "ps2EntryRunner", "-j",
                                               std::to_string(cores())};
             if (interrupted)
                 build.push_back("--clean-first");
@@ -1198,7 +1331,13 @@ namespace builder
                 if (fs::exists("/usr/bin/timeout", ec))
                     learner.insert(learner.begin(), {"/usr/bin/timeout", useVirtual ? "1800" : "400"});
                 // The timeout above is the normal limit; this is the backstop if it never ends the tree.
+#if defined(_WIN32)
+                // Nothing wraps it on Windows, so this is the limit. A pass is about four minutes
+                // on a laptop; the margin is for slower machines.
+                return runTool(learner, learn, environment, cb.onLine, pid, 1200);
+#else
                 return runTool(learner, learn, environment, cb.onLine, pid, (useVirtual ? 1800 : 400) + 60);
+#endif
             };
             auto collectCaptures = [&]()
             {
@@ -1281,14 +1420,13 @@ namespace builder
 
             // Re-configure as well as build: the CMake only takes the VU1 sources if
             // the registry existed when it last configured.
-            std::vector<std::string> configure = {"cmake", "-S", portDir, "-B", buildDir, "-DCMAKE_BUILD_TYPE=Release",
-                                                  "-DPS2X_VU1_PROGRAMS=" + vu1Dir};
+            std::vector<std::string> configure = configureArgs({"-DPS2X_VU1_PROGRAMS=" + vu1Dir});
             {
                 const int status = shell(configure, "");
                 if (status != 0)
                     return failed("configuring the port with the microprograms", status);
             }
-            std::vector<std::string> rebuild = {"cmake", "--build", buildDir, "--target", "ps2EntryRunner", "-j",
+            std::vector<std::string> rebuild = {cmake, "--build", buildDir, "--target", "ps2EntryRunner", "-j",
                                                 std::to_string(cores())};
             if (interrupted)
                 rebuild.push_back("--clean-first");
@@ -1370,6 +1508,11 @@ namespace builder
                 cb.onLine("the Windows build is in " + out);
         }
 
+#if defined(_WIN32)
+        // A folder the WSL build packaged would be played instead of this build, so it goes.
+        if (fs::exists(windowsOutDir(portDir), ec))
+            fs::remove_all(windowsOutDir(portDir), ec);
+#endif
         return true;
     }
 

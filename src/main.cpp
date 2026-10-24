@@ -1252,12 +1252,13 @@ int main(int argc, char **argv)
     // Fullscreen by default: this is a front end meant to sit on the screen like a
     // console menu. F11 swaps at any time, and --screenshot always stays windowed
     // so a capture is the same size whatever the display.
+    //
+    // Borderless, not exclusive: an exclusive fullscreen window is kept on top and
+    // minimizes itself when it loses focus, which on Windows put the game behind it
+    // and left the launcher minimized once the game closed. A borderless one sits
+    // behind the game as a black screen and is simply there again afterwards.
     if (settings.fullscreen && screenshotPath.empty())
-    {
-        const int monitor = GetCurrentMonitor();
-        SetWindowSize(GetMonitorWidth(monitor), GetMonitorHeight(monitor));
-        ToggleFullscreen();
-    }
+        ToggleBorderlessWindowed();
 
     for (Game &game : games)
     {
@@ -2357,8 +2358,6 @@ int main(int argc, char **argv)
             const int index = jobGame;
             jobAway = Job::None;
             SetTargetFPS(60);
-            if (finished == Job::Game)
-                RestoreWindow(); // it stepped aside for the game; back now the game is gone
             SetWindowFocused();
             menuLit = 0.0f;
             if (finished == Job::Game)
@@ -3227,11 +3226,7 @@ int main(int argc, char **argv)
         }
         if ((IsKeyPressed(KEY_F11) || padPressedAny(GAMEPAD_BUTTON_MIDDLE_LEFT)) && screenshotPath.empty())
         {
-            ToggleFullscreen();
-            // Leaving fullscreen leaves the window at the monitor's size, so put it
-            // back to the size the layout was drawn for.
-            if (!IsWindowFullscreen())
-                SetWindowSize(1280, 720);
+            ToggleBorderlessWindowed();
         }
 
         if (gamepad >= 0)
@@ -3305,12 +3300,10 @@ int main(int argc, char **argv)
         if (activate && games[selected].available)
         {
             silenceThemes(games); // the game brings its own music
-            const bool fullscreen = IsWindowFullscreen() || IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE);
+            platform::allowOthersToTakeFront(); // the game opens in front of the black screen
+            const bool fullscreen = IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE);
             startJob(Job::Game, selected, launchCommand(games[selected], fullscreen ? "fullscreen" : "windowed"),
                      false);
-            // Out of the game's way. A fullscreen launcher otherwise keeps the top of
-            // the stack on Windows, and the game opens behind it with no way to reach it.
-            MinimizeWindow();
         }
 
         // ---------------------------------------------------------- draw

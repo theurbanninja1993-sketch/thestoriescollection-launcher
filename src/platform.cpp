@@ -211,6 +211,13 @@ namespace platform
 #endif
     }
 
+    void allowOthersToTakeFront()
+    {
+#if defined(_WIN32)
+        AllowSetForegroundWindow(ASFW_ANY);
+#endif
+    }
+
     bool wslAvailable()
     {
 #if defined(_WIN32)

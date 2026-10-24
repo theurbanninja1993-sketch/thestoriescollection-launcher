@@ -69,6 +69,10 @@ namespace platform
     // if they are told a command line".
     bool runDetached(const std::string &program, const std::vector<std::string> &arguments);
 
+    // Lets the next window another process opens take the foreground from this one.
+    // Windows otherwise may keep it behind the launcher; elsewhere nothing to do.
+    void allowOthersToTakeFront();
+
     // Whether WSL is installed at all, so the launcher can say what is missing rather
     // than start something that is not there. False everywhere but Windows.
     bool wslAvailable();

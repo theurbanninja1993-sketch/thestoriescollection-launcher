@@ -1410,6 +1410,9 @@ int main(int argc, char **argv)
     std::atomic<bool> buildStop{false};
     std::atomic<bool> buildOk{false};
     double buildStarted = 0.0;
+    // Linux: when the launcher steps aside for a running game (see the away loop).
+    double hideForGameAt = 0.0;
+    bool hiddenForGame = false;
     bool buildCrosses = false;       // whether this run also cross-compiles Windows
     std::vector<int> buildPlan;      // the steps it will take, in order
     int buildPlanAt = 0;             // which of them is running
@@ -2354,6 +2357,18 @@ int main(int argc, char **argv)
                 buildStop = true;
                 builder::stop(buildPid);
             }
+#if !defined(PS2X_LAUNCHER_WINDOWS)
+            // A desktop's focus-stealing prevention (KDE on Wayland, for one) opens the
+            // game *behind* the launcher, and no program may raise itself there. So the
+            // launcher covers the game's start with its black screen and then hides,
+            // which leaves the game in front; it is shown again when the game exits.
+            if (hideForGameAt > 0.0 && GetTime() >= hideForGameAt)
+            {
+                hideForGameAt = 0.0;
+                hiddenForGame = true;
+                SetWindowState(FLAG_WINDOW_HIDDEN);
+            }
+#endif
             BeginDrawing();
             drawAwayScreen(static_cast<Job>(jobKind.load()));
             EndDrawing();
@@ -2366,6 +2381,12 @@ int main(int argc, char **argv)
             const int index = jobGame;
             jobAway = Job::None;
             SetTargetFPS(60);
+            hideForGameAt = 0.0;
+            if (hiddenForGame)
+            {
+                hiddenForGame = false;
+                ClearWindowState(FLAG_WINDOW_HIDDEN);
+            }
             SetWindowFocused();
             menuLit = 0.0f;
             if (finished == Job::Game)
@@ -3318,6 +3339,7 @@ int main(int argc, char **argv)
             const bool fullscreen = IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE);
             startJob(Job::Game, selected, launchCommand(games[selected], fullscreen ? "fullscreen" : "windowed"),
                      false);
+            hideForGameAt = GetTime() + 2.0; // the game's window is up by then (Linux only)
         }
 
         // ---------------------------------------------------------- draw

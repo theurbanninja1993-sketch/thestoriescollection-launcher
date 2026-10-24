@@ -50,7 +50,9 @@ namespace builder
         std::string learnFrames;
     };
 
-    Recipe readRecipe(const std::string &portDir);
+    // games/<gameId>/game.toml when the source has one by that name (a source can
+    // hold both Stories games); otherwise the source's only game.
+    Recipe readRecipe(const std::string &portDir, const std::string &gameId = {});
 
     // --------------------------------------------------------------- the steps
 

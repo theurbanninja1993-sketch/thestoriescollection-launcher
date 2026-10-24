@@ -801,7 +801,7 @@ namespace
 #endif
         if (game.data.empty())
         {
-            const builder::Recipe recipe = builder::readRecipe(game.portDir);
+            const builder::Recipe recipe = builder::readRecipe(game.portDir, game.id);
             if (recipe.ok)
                 game.data = builder::builtGameDir(game.portDir) + "/" + recipe.bootFile;
         }
@@ -1993,7 +1993,7 @@ int main(int argc, char **argv)
             write("", "If the build failed, the last line below is the reason.");
             write("", "");
 
-            const builder::Recipe recipe = builder::readRecipe(games[index].portDir);
+            const builder::Recipe recipe = builder::readRecipe(games[index].portDir, games[index].id);
             if (!recipe.ok)
             {
                 write("", recipe.error);

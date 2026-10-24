@@ -884,7 +884,7 @@ namespace builder
 
     // ------------------------------------------------------------------- recipe
 
-    Recipe readRecipe(const std::string &portDir)
+    Recipe readRecipe(const std::string &portDir, const std::string &gameId)
     {
         Recipe recipe;
         std::error_code ec;
@@ -901,9 +901,11 @@ namespace builder
             recipe.error = "no game.toml under " + games.string() + " - is this the port's source?";
             return recipe;
         }
+        if (!gameId.empty() && fs::exists(games / gameId / "game.toml", ec))
+            manifests = {games / gameId / "game.toml"};
         if (manifests.size() > 1)
         {
-            recipe.error = "more than one game in " + games.string() + "; the wizard expects one";
+            recipe.error = "more than one game in " + games.string() + ", and none named " + gameId;
             return recipe;
         }
         const fs::path manifest = manifests.front();
@@ -952,7 +954,9 @@ namespace builder
             recipe.error = manifest.string() + " does not say which file on the disc is the game";
             return recipe;
         }
-        if (!fs::exists(recipe.config, ec) || !fs::exists(recipe.functionMap, ec))
+        // The function map is optional: without one the recompiler finds the
+        // functions itself (LCS works that way).
+        if (!fs::exists(recipe.config, ec) || (!recipe.functionMap.empty() && !fs::exists(recipe.functionMap, ec)))
         {
             recipe.error = "the manifest's config or function map is missing from the source";
             return recipe;

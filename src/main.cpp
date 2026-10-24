@@ -903,13 +903,23 @@ namespace
     //
     // PS2X_LAUNCHED_FROM_LAUNCHER is what lets the game's settings say "Return to
     // game select" instead of "Quit to desktop" - which is what actually happens.
-    std::string launchCommand(const Game &game)
+    //
+    // PS2X_DISPLAY_MODE hands the game the launcher's own mode, so a fullscreen
+    // launcher starts the game fullscreen and a windowed one starts it windowed.
+    // Empty (the headless --launch) leaves the game's own setting alone.
+    std::string launchCommand(const Game &game, const std::string &displayMode = {})
     {
 #if defined(PS2X_LAUNCHER_WINDOWS)
-        std::string command =
-            "set PS2X_LAUNCHED_FROM_LAUNCHER=1 && cd /d \"" + directoryOf(game.exe) + "\"";
+        std::string command = "set PS2X_LAUNCHED_FROM_LAUNCHER=1 && ";
+        // Quoted, or cmd keeps the space before && as part of the value.
+        if (!displayMode.empty())
+            command += "set \"PS2X_DISPLAY_MODE=" + displayMode + "\" && ";
+        command += "cd /d \"" + directoryOf(game.exe) + "\"";
 #else
-        std::string command = "export PS2X_LAUNCHED_FROM_LAUNCHER=1; cd \"" + directoryOf(game.exe) + "\"";
+        std::string command = "export PS2X_LAUNCHED_FROM_LAUNCHER=1; ";
+        if (!displayMode.empty())
+            command += "export PS2X_DISPLAY_MODE=" + displayMode + "; ";
+        command += "cd \"" + directoryOf(game.exe) + "\"";
 #endif
         command += " && \"" + game.exe + "\"";
         if (!game.data.empty())
@@ -3276,7 +3286,9 @@ int main(int argc, char **argv)
         if (activate && games[selected].available)
         {
             silenceThemes(games); // the game brings its own music
-            startJob(Job::Game, selected, launchCommand(games[selected]), false);
+            const bool fullscreen = IsWindowFullscreen() || IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE);
+            startJob(Job::Game, selected, launchCommand(games[selected], fullscreen ? "fullscreen" : "windowed"),
+                     false);
             // Out of the game's way. A fullscreen launcher otherwise keeps the top of
             // the stack on Windows, and the game opens behind it with no way to reach it.
             MinimizeWindow();

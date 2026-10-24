@@ -599,6 +599,104 @@ namespace builder
         }
     }
 
+    // ------------------------------------------------------------------ update
+
+    std::string syncSource(const std::string &incoming, const std::string &portDir, size_t &changed,
+                           size_t &kept, size_t &removed)
+    {
+        changed = kept = removed = 0;
+        std::error_code ec;
+        if (!fs::is_directory(incoming, ec))
+            return "nothing was unpacked to " + incoming;
+        const fs::path port(portDir);
+        // The files the last update put here, so a file the source has since dropped
+        // can be told apart from one the build made.
+        const fs::path manifest = port / ".ps2x-source-files";
+        const bool knowsOld = fs::exists(manifest, ec);
+        auto owned = [](const fs::path &relative)
+        {
+            const std::string first = relative.begin() == relative.end() ? std::string{} : relative.begin()->string();
+            return first != "build" && first != "dist" && first != ".ps2x-source-files";
+        };
+
+        // A folder from before the manifest: its source goes, and the build stays.
+        if (!knowsOld && fs::exists(port, ec))
+            for (const fs::directory_entry &entry : fs::directory_iterator(port, ec))
+                if (owned(entry.path().filename()))
+                    fs::remove_all(entry.path(), ec);
+
+        // Code the build installs into the source tree. The source's placeholder
+        // for it is not copied over it: the build would only copy its own back, and
+        // a changed timestamp on it means recompiling it.
+        const fs::path generated = port / "build" / "generated";
+        auto installedByBuild = [&](const fs::path &relative)
+        {
+            const std::string parent = relative.parent_path().generic_string();
+            return (parent == "ps2xRuntime/src/runner" || parent == "ps2xRuntime/include") &&
+                   fs::exists(generated / relative.filename(), ec);
+        };
+
+        std::vector<std::string> now;
+        for (const fs::directory_entry &entry : fs::recursive_directory_iterator(incoming, ec))
+        {
+            if (!entry.is_regular_file())
+                continue;
+            const fs::path relative = fs::relative(entry.path(), incoming, ec);
+            if (!owned(relative))
+                continue;
+            now.push_back(relative.generic_string());
+            const fs::path target = port / relative;
+            if (installedByBuild(relative) && fs::exists(target, ec))
+            {
+                ++kept;
+                continue;
+            }
+            std::error_code same;
+            if (fs::exists(target, same) && fs::file_size(target, same) == entry.file_size(same) &&
+                readFile(target.string()) == readFile(entry.path().string()))
+            {
+                ++kept;
+                continue;
+            }
+            fs::create_directories(target.parent_path(), ec);
+            std::error_code copyEc;
+            fs::copy_file(entry.path(), target, fs::copy_options::overwrite_existing, copyEc);
+            if (copyEc)
+                return "could not write " + target.string() + ": " + copyEc.message();
+            // Stamped now. Unpacking dates every file to its commit, and Windows'
+            // copy keeps that, so a changed file could look older than the build
+            // made from the version before it - and never be compiled.
+            fs::last_write_time(target, fs::file_time_type::clock::now(), ec);
+            ++changed;
+        }
+
+        if (knowsOld)
+        {
+            std::istringstream old(readFile(manifest.string()));
+            std::vector<std::string> sorted = now;
+            std::sort(sorted.begin(), sorted.end());
+            std::string line;
+            while (std::getline(old, line))
+            {
+                line = trim(line);
+                if (line.empty() || !owned(fs::path(line)) || std::binary_search(sorted.begin(), sorted.end(), line))
+                    continue;
+                if (installedByBuild(fs::path(line)))
+                    continue;
+                if (fs::remove(port / line, ec))
+                    ++removed;
+            }
+        }
+
+        std::string list;
+        for (const std::string &name : now)
+            list += name + "\n";
+        if (!writeFile(manifest.string(), list))
+            return "could not write " + manifest.string();
+        fs::remove_all(incoming, ec);
+        return {};
+    }
+
     // ------------------------------------------------------------------ sources
 
     std::vector<Source> findSources(const std::string &configDir)
@@ -1194,12 +1292,29 @@ namespace builder
             return false;
         if (!imageIsFolder)
         {
-            fs::remove_all(discDir, ec);
-            fs::create_directories(discDir, ec);
+            // The same image as last time is not read again: the marker names it by
+            // path, size and date, and is written only once an extraction finished.
+            const std::string extracted = join(discDir, ".ps2x-extracted");
+            std::string identity = image;
             {
+                std::error_code idEc;
+                const auto size = fs::is_regular_file(image, idEc) ? fs::file_size(image, idEc) : 0;
+                const auto when = fs::last_write_time(image, idEc).time_since_epoch().count();
+                identity += "|" + std::to_string(size) + "|" + std::to_string(static_cast<long long>(when));
+            }
+            if (readFile(extracted) == identity && fs::exists(bootPath, ec))
+            {
+                if (cb.onLine)
+                    cb.onLine("this disc is already extracted");
+            }
+            else
+            {
+                fs::remove_all(discDir, ec);
+                fs::create_directories(discDir, ec);
                 const int status = shell({ps2Iso, "extract", image, discDir}, "");
                 if (status != 0)
                     return failed("extracting the disc", status);
+                writeFile(extracted, identity);
             }
         }
 
@@ -1268,6 +1383,41 @@ namespace builder
         // -------------------------------------------------------------- compile
         if (!step(StepCompile))
             return false;
+        // An earlier build's recordings, if it finished its passes. They come from the
+        // disc, not from the source, so an update can reuse them: the programs are
+        // compiled again from them with this source's compiler, and the passes - the
+        // longest part of a rebuild - are skipped. If that fails, the passes run.
+        const std::string learned = join(learn, ".ps2x-learned");
+        bool reuseCaptures = false;
+        if (fs::exists(learned, ec))
+        {
+            std::vector<std::string> captures;
+            for (const fs::directory_entry &entry : fs::directory_iterator(learn, ec))
+            {
+                const std::string name = entry.path().filename().string();
+                if (entry.is_regular_file() && name.rfind("vu1_learn_", 0) == 0 && entry.path().extension() == ".bin")
+                    captures.push_back(entry.path().string());
+            }
+            std::sort(captures.begin(), captures.end());
+            if (!captures.empty())
+            {
+                if (cb.onLine)
+                    cb.onLine("reusing " + std::to_string(captures.size()) +
+                              " VU1 recording(s) from the last build, so the passes can be skipped");
+                fs::remove_all(vu1Dir, ec);
+                fs::create_directories(vu1Dir, ec);
+                std::vector<std::string> recompiler = {vu1Recomp, vu1Dir};
+                recompiler.insert(recompiler.end(), captures.begin(), captures.end());
+                reuseCaptures = shell(recompiler, "") == 0 && fs::exists(join(vu1Dir, "vu1_programs.cpp"), ec);
+                if (!reuseCaptures)
+                {
+                    if (cb.onLine)
+                        cb.onLine("those recordings did not compile with this source; the passes will run");
+                    fs::remove_all(vu1Dir, ec);
+                    fs::remove(learned, ec);
+                }
+            }
+        }
         {
             std::vector<std::string> configure = configureArgs({"-DPS2X_VU1_PROGRAMS=" + vu1Dir});
             {
@@ -1289,165 +1439,176 @@ namespace builder
         // ------------------------------------------------------------------ vu1
         if (!step(StepVu1))
             return false;
-        // The capture folder is cleared once, before the passes, so that they
-        // accumulate: the second pass starts from what the first recorded and asks
-        // for programs it never reached, which is the whole point of running twice.
-        // Clearing it per pass would throw away everything the earlier pass found.
-        fs::remove_all(learn, ec);
-        fs::create_directories(learn, ec);
-        for (int pass = 1; pass <= recipe.learnPasses; ++pass)
+        if (reuseCaptures)
         {
-            if (!(cb.keepGoing == nullptr || cb.keepGoing()))
-                return false;
             if (cb.onLine)
-                cb.onLine("pass " + std::to_string(pass) + " of " + std::to_string(recipe.learnPasses));
+                cb.onLine("the microprograms were compiled from the last build's recordings");
+        }
+        else
+        {
+            fs::remove(learned, ec);
+            // The capture folder is cleared once, before the passes, so that they
+            // accumulate: the second pass starts from what the first recorded and asks
+            // for programs it never reached, which is the whole point of running twice.
+            // Clearing it per pass would throw away everything the earlier pass found.
+            fs::remove_all(learn, ec);
+            fs::create_directories(learn, ec);
+            for (int pass = 1; pass <= recipe.learnPasses; ++pass)
+            {
+                if (!(cb.keepGoing == nullptr || cb.keepGoing()))
+                    return false;
+                if (cb.onLine)
+                    cb.onLine("pass " + std::to_string(pass) + " of " + std::to_string(recipe.learnPasses));
 
-            // The pass runs the game for its recordings, with its window hidden so it stays
-            // off the desktop. Some graphics stacks refuse a hidden window (GLXBadFBConfig
-            // under WSL), and then nothing is recorded, so a pass that records nothing is run
-            // once more with a visible window before the build gives up.
-            // Linux helpers. Never on Windows, where Wine's view of / would otherwise
-            // find the Linux machine's copies and hand the game to them.
-            auto hostHas = [&](const char *path)
-            {
-#if defined(_WIN32)
-                (void)path;
-                return false;
-#else
-                return fs::exists(path, ec);
-#endif
-            };
-            auto learnPass = [&](bool hidden, bool virtualDisplay) -> int
-            {
-                std::vector<std::string> environment = {"PS2X_NO_LAUNCH_MENU=1",
-                                                        "PS2X_VU1_LEARN=" + learn,
-                                                        "PS2X_PAD_SCRIPT=" + recipe.learnPadScript};
-                if (hidden)
-                    environment.insert(environment.begin(), "PS2X_HIDDEN_WINDOW=1");
-                if (!recipe.learnFrames.empty())
-                    environment.push_back("PS2X_EXIT_AFTER_FRAME=" + recipe.learnFrames);
-                // The first pass must start from nothing, or it would only record what is
-                // already compiled and never find the rest.
-                if (pass == 1)
-                    environment.push_back("PS2X_VU1_NO_COMPILED=1");
+                // The pass runs the game for its recordings, with its window hidden so it stays
+                // off the desktop. Some graphics stacks refuse a hidden window (GLXBadFBConfig
+                // under WSL), and then nothing is recorded, so a pass that records nothing is run
+                // once more with a visible window before the build gives up.
+                // Linux helpers. Never on Windows, where Wine's view of / would otherwise
+                // find the Linux machine's copies and hand the game to them.
+                auto hostHas = [&](const char *path)
+                {
+    #if defined(_WIN32)
+                    (void)path;
+                    return false;
+    #else
+                    return fs::exists(path, ec);
+    #endif
+                };
+                auto learnPass = [&](bool hidden, bool virtualDisplay) -> int
+                {
+                    std::vector<std::string> environment = {"PS2X_NO_LAUNCH_MENU=1",
+                                                            "PS2X_VU1_LEARN=" + learn,
+                                                            "PS2X_PAD_SCRIPT=" + recipe.learnPadScript};
+                    if (hidden)
+                        environment.insert(environment.begin(), "PS2X_HIDDEN_WINDOW=1");
+                    if (!recipe.learnFrames.empty())
+                        environment.push_back("PS2X_EXIT_AFTER_FRAME=" + recipe.learnFrames);
+                    // The first pass must start from nothing, or it would only record what is
+                    // already compiled and never find the rest.
+                    if (pass == 1)
+                        environment.push_back("PS2X_VU1_NO_COMPILED=1");
 
-                // The pass exits on the manifest's frame count; the timeout is only there
-                // in case a game never reaches it.
-                // A private X server, when the xvfb package is installed: the game then talks to
-                // that instead of the desktop, which is where a display can refuse the visual. It is
-                // software rendering, so the pass gets longer. The timeout wraps the whole thing: an
-                // X server that never starts once held a build on this step for hours.
-                const bool useVirtual = virtualDisplay && hostHas("/usr/bin/xvfb-run");
-                std::vector<std::string> learner = {runner, bootPath};
-                if (useVirtual)
-                    learner = {"xvfb-run", "-a", runner, bootPath};
-                if (hostHas("/usr/bin/timeout"))
-                    learner.insert(learner.begin(), {"/usr/bin/timeout", useVirtual ? "1800" : "400"});
-                // The timeout above is the normal limit; this is the backstop if it never ends the tree.
-#if defined(_WIN32)
-                // Nothing wraps it on Windows, so this is the limit. A pass is about four minutes
-                // on a laptop; the margin is for slower machines.
-                return runTool(learner, learn, environment, cb.onLine, pid, 1200);
-#else
-                return runTool(learner, learn, environment, cb.onLine, pid, (useVirtual ? 1800 : 400) + 60);
-#endif
-            };
-            auto collectCaptures = [&]()
-            {
-                std::vector<std::string> found;
-                for (const fs::directory_entry &entry : fs::directory_iterator(learn, ec))
+                    // The pass exits on the manifest's frame count; the timeout is only there
+                    // in case a game never reaches it.
+                    // A private X server, when the xvfb package is installed: the game then talks to
+                    // that instead of the desktop, which is where a display can refuse the visual. It is
+                    // software rendering, so the pass gets longer. The timeout wraps the whole thing: an
+                    // X server that never starts once held a build on this step for hours.
+                    const bool useVirtual = virtualDisplay && hostHas("/usr/bin/xvfb-run");
+                    std::vector<std::string> learner = {runner, bootPath};
+                    if (useVirtual)
+                        learner = {"xvfb-run", "-a", runner, bootPath};
+                    if (hostHas("/usr/bin/timeout"))
+                        learner.insert(learner.begin(), {"/usr/bin/timeout", useVirtual ? "1800" : "400"});
+                    // The timeout above is the normal limit; this is the backstop if it never ends the tree.
+    #if defined(_WIN32)
+                    // Nothing wraps it on Windows, so this is the limit. A pass is about four minutes
+                    // on a laptop; the margin is for slower machines.
+                    return runTool(learner, learn, environment, cb.onLine, pid, 1200);
+    #else
+                    return runTool(learner, learn, environment, cb.onLine, pid, (useVirtual ? 1800 : 400) + 60);
+    #endif
+                };
+                auto collectCaptures = [&]()
+                {
+                    std::vector<std::string> found;
+                    for (const fs::directory_entry &entry : fs::directory_iterator(learn, ec))
+                    {
+                        const std::string name = entry.path().filename().string();
+                        if (entry.is_regular_file() && name.rfind("vu1_learn_", 0) == 0 && entry.path().extension() == ".bin")
+                            found.push_back(entry.path().string());
+                    }
+                    return found;
+                };
+
+                int learnStatus = learnPass(true, false);
+                if (learnStatus != 0 && cb.onLine)
+                    cb.onLine("that pass ended early; that is fine if it recorded something");
+                std::vector<std::string> captures = collectCaptures();
+                if (captures.empty())
+                {
+                    if (cb.onLine)
+                        cb.onLine("the pass recorded nothing with a hidden window; running it once more with a visible one");
+                    learnStatus = learnPass(false, false);
+                    if (learnStatus != 0 && cb.onLine)
+                        cb.onLine("that visible pass ended early too");
+                    captures = collectCaptures();
+                }
+                if (captures.empty() && hostHas("/usr/bin/xvfb-run"))
+                {
+                    if (cb.onLine)
+                        cb.onLine("still nothing; running it once more under a private virtual display");
+                    learnStatus = learnPass(true, true);
+                    if (learnStatus != 0 && cb.onLine)
+                        cb.onLine("that virtual-display pass ended early too");
+                    captures = collectCaptures();
+                }
+
+                fs::remove_all(vu1Dir, ec);
+                fs::create_directories(vu1Dir, ec);
+                if (captures.empty())
+                {
+                    if (cb.onLine)
+                        cb.onLine("no microprograms were recorded; the game did not reach gameplay");
+                    return false;
+                }
+                std::sort(captures.begin(), captures.end());
+
+                std::vector<std::string> recompiler = {vu1Recomp, vu1Dir};
+                recompiler.insert(recompiler.end(), captures.begin(), captures.end());
+                {
+                    const int status = shell(recompiler, "");
+                    if (status != 0)
+                        return failed("the VU1 compiler", status);
+                }
+                if (!fs::exists(join(vu1Dir, "vu1_programs.cpp"), ec))
+                {
+                    if (cb.onLine)
+                        cb.onLine("the VU1 compiler wrote no registry");
+                    return false;
+                }
+                size_t programs = 0;
+                for (const fs::directory_entry &entry : fs::directory_iterator(vu1Dir, ec))
                 {
                     const std::string name = entry.path().filename().string();
-                    if (entry.is_regular_file() && name.rfind("vu1_learn_", 0) == 0 && entry.path().extension() == ".bin")
-                        found.push_back(entry.path().string());
+                    if (name.rfind("vu1p_", 0) == 0 && entry.path().extension() == ".cpp")
+                        ++programs;
                 }
-                return found;
-            };
-
-            int learnStatus = learnPass(true, false);
-            if (learnStatus != 0 && cb.onLine)
-                cb.onLine("that pass ended early; that is fine if it recorded something");
-            std::vector<std::string> captures = collectCaptures();
-            if (captures.empty())
-            {
                 if (cb.onLine)
-                    cb.onLine("the pass recorded nothing with a hidden window; running it once more with a visible one");
-                learnStatus = learnPass(false, false);
-                if (learnStatus != 0 && cb.onLine)
-                    cb.onLine("that visible pass ended early too");
-                captures = collectCaptures();
-            }
-            if (captures.empty() && hostHas("/usr/bin/xvfb-run"))
-            {
-                if (cb.onLine)
-                    cb.onLine("still nothing; running it once more under a private virtual display");
-                learnStatus = learnPass(true, true);
-                if (learnStatus != 0 && cb.onLine)
-                    cb.onLine("that virtual-display pass ended early too");
-                captures = collectCaptures();
-            }
-
-            fs::remove_all(vu1Dir, ec);
-            fs::create_directories(vu1Dir, ec);
-            if (captures.empty())
-            {
-                if (cb.onLine)
-                    cb.onLine("no microprograms were recorded; the game did not reach gameplay");
-                return false;
-            }
-            std::sort(captures.begin(), captures.end());
-
-            std::vector<std::string> recompiler = {vu1Recomp, vu1Dir};
-            recompiler.insert(recompiler.end(), captures.begin(), captures.end());
-            {
-                const int status = shell(recompiler, "");
-                if (status != 0)
-                    return failed("the VU1 compiler", status);
-            }
-            if (!fs::exists(join(vu1Dir, "vu1_programs.cpp"), ec))
-            {
-                if (cb.onLine)
-                    cb.onLine("the VU1 compiler wrote no registry");
-                return false;
-            }
-            size_t programs = 0;
-            for (const fs::directory_entry &entry : fs::directory_iterator(vu1Dir, ec))
-            {
-                const std::string name = entry.path().filename().string();
-                if (name.rfind("vu1p_", 0) == 0 && entry.path().extension() == ".cpp")
-                    ++programs;
-            }
-            if (cb.onLine)
-            {
-                size_t capturesTotal = 0;
-                for (const fs::directory_entry &entry : fs::directory_iterator(learn, ec))
                 {
-                    const std::string name = entry.path().filename().string();
-                    if (entry.is_regular_file() && name.rfind("vu1_learn_", 0) == 0)
-                        ++capturesTotal;
+                    size_t capturesTotal = 0;
+                    for (const fs::directory_entry &entry : fs::directory_iterator(learn, ec))
+                    {
+                        const std::string name = entry.path().filename().string();
+                        if (entry.is_regular_file() && name.rfind("vu1_learn_", 0) == 0)
+                            ++capturesTotal;
+                    }
+                    // Both numbers, because they should grow from pass to pass.
+                    cb.onLine(std::to_string(capturesTotal) + " capture(s), " + std::to_string(programs) +
+                              " microprogram(s) so far");
                 }
-                // Both numbers, because they should grow from pass to pass.
-                cb.onLine(std::to_string(capturesTotal) + " capture(s), " + std::to_string(programs) +
-                          " microprogram(s) so far");
-            }
 
-            // Re-configure as well as build: the CMake only takes the VU1 sources if
-            // the registry existed when it last configured.
-            std::vector<std::string> configure = configureArgs({"-DPS2X_VU1_PROGRAMS=" + vu1Dir});
-            {
-                const int status = shell(configure, "");
-                if (status != 0)
-                    return failed("configuring the port with the microprograms", status);
+                // Re-configure as well as build: the CMake only takes the VU1 sources if
+                // the registry existed when it last configured.
+                std::vector<std::string> configure = configureArgs({"-DPS2X_VU1_PROGRAMS=" + vu1Dir});
+                {
+                    const int status = shell(configure, "");
+                    if (status != 0)
+                        return failed("configuring the port with the microprograms", status);
+                }
+                std::vector<std::string> rebuild = {cmake, "--build", buildDir, "--target", "ps2EntryRunner", "-j",
+                                                    std::to_string(cores())};
+                if (interrupted)
+                    rebuild.push_back("--clean-first");
+                {
+                    const int status = shell(rebuild, "");
+                    if (status != 0)
+                        return failed("compiling the port with the microprograms", status);
+                }
             }
-            std::vector<std::string> rebuild = {cmake, "--build", buildDir, "--target", "ps2EntryRunner", "-j",
-                                                std::to_string(cores())};
-            if (interrupted)
-                rebuild.push_back("--clean-first");
-            {
-                const int status = shell(rebuild, "");
-                if (status != 0)
-                    return failed("compiling the port with the microprograms", status);
-            }
+            // Both passes done: the next build can reuse what they recorded.
+            writeFile(learned, "complete\n");
         }
 
         // -------------------------------------------------------------- windows

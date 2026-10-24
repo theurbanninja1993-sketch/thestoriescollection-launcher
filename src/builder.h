@@ -95,9 +95,15 @@ namespace builder
     // the exe, its DLLs and the game's files, all in one folder.
     std::string windowsOutDir(const std::string &portDir);
 
-    // Whether this platform can run a build at all. The port's Windows binary is
-    // cross-compiled from Linux and has never been built on Windows, so there is no
-    // Windows build to drive yet.
+    // Moves a freshly unpacked source (`incoming`) into the port folder, keeping
+    // what an update does not change. Files whose content is the same are left
+    // alone, timestamps and all, so the next build recompiles only what changed;
+    // build/ and dist/ are never touched; files the last source had and this one
+    // does not are removed. Returns an empty string, or what went wrong.
+    std::string syncSource(const std::string &incoming, const std::string &portDir, size_t &changed,
+                           size_t &kept, size_t &removed);
+
+    // Whether this platform can run a build at all.
     bool supported();
     const char *unsupportedNote();
 

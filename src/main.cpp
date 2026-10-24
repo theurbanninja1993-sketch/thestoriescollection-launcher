@@ -793,13 +793,17 @@ namespace
         if (!parent.empty())
             command += platform::makeDirectoryCommand(parent) + join;
         command += platform::changeDirectoryCommand(parent) + join;
+        // Unpacked beside the port rather than over it: the launcher then moves in
+        // only what changed (builder::syncSource), so the build folder, the disc it
+        // extracted and the compiled code all survive an update.
+        const std::string incoming = folder + ".incoming";
         if (safeToWipe(game.portDir))
-            command += platform::removeTreeCommand(game.portDir) + join;
-        command += platform::makeDirectoryCommand(game.portDir) + join;
+            command += platform::removeTreeCommand(game.portDir + ".incoming") + join;
+        command += platform::makeDirectoryCommand(game.portDir + ".incoming") + join;
         command += "echo downloading, about 5 MB && ";
         command += "curl -fL --retry 3 -o \"" + tarball + "\" \"" + archive + "\" && ";
         command += "echo unpacking && ";
-        command += "tar -xzf \"" + tarball + "\" -C \"" + folder + "\" --strip-components=1 && ";
+        command += "tar -xzf \"" + tarball + "\" -C \"" + incoming + "\" --strip-components=1 && ";
         command += platform::removeFileCommand(tarball) + " && ";
         command += "echo asking GitHub which revision that was && ";
         command += "curl -sL -o \"" + revisionFile + "\" \"" + revision + "\" && ";
@@ -1902,6 +1906,21 @@ int main(int argc, char **argv)
                 // The update is not over when the download is: the archive unpacks
                 // into a folder named after the release, and the swap needs a script.
                 std::string reason;
+                if (!update && jobStatus == 0)
+                {
+                    size_t changed = 0, kept = 0, removed = 0;
+                    reason = builder::syncSource(games[index].portDir + ".incoming", games[index].portDir, changed,
+                                                 kept, removed);
+                    const std::string said = reason.empty()
+                                                 ? std::to_string(changed) + " files changed, " +
+                                                       std::to_string(kept) + " unchanged, " +
+                                                       std::to_string(removed) + " removed"
+                                                 : reason;
+                    lines.push_back(said);
+                    std::ofstream(logPath, std::ios::binary | std::ios::app) << said << "\n";
+                    if (!reason.empty())
+                        jobStatus = 1;
+                }
                 if (update && jobStatus == 0)
                 {
                     reason = stageLauncherUpdate(directory, updateStagingDirectory(), launcherExeName(),

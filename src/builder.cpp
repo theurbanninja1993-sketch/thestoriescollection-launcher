@@ -644,15 +644,32 @@ namespace builder
 
         // Compiles every recording into dir, through a scratch folder so a failure
         // leaves the programs the build already has.
+        // The ELF and layout a build compiled programs from (see Recipe::vuLayout),
+        // kept so the compile after play includes them again.
+        std::string vuSourceFile(const std::string &portDir) { return join(portDir, "build/.ps2x-vu-source"); }
+        std::vector<std::string> elfArguments(const std::string &portDir)
+        {
+            std::istringstream in(readFile(vuSourceFile(portDir)));
+            std::string elf, layout;
+            std::getline(in, elf);
+            std::getline(in, layout);
+            std::error_code ec;
+            if (elf.empty() || layout.empty() || !fs::exists(elf, ec) || !fs::exists(layout, ec))
+                return {};
+            return {"--elf", elf, "--layout", layout};
+        }
+
         bool compilePrograms(const std::string &vu1Recomp, const std::string &dir,
                              const std::vector<std::string> &recordings,
-                             const std::function<int(const std::vector<std::string> &)> &shell)
+                             const std::function<int(const std::vector<std::string> &)> &shell,
+                             const std::vector<std::string> &elfArgs = {})
         {
             std::error_code ec;
             const std::string scratch = dir + ".new";
             fs::remove_all(scratch, ec);
             fs::create_directories(scratch, ec);
             std::vector<std::string> argv = {vu1Recomp, scratch};
+            argv.insert(argv.end(), elfArgs.begin(), elfArgs.end());
             argv.insert(argv.end(), recordings.begin(), recordings.end());
             if (shell(argv) != 0 || !fs::exists(join(scratch, "vu1_programs.cpp"), ec))
             {
@@ -724,7 +741,7 @@ namespace builder
         std::vector<std::string> all = recordingsIn(join(buildDir, "vu1_learn"));
         const std::vector<std::string> fromPlay = recordingsIn(played);
         all.insert(all.end(), fromPlay.begin(), fromPlay.end());
-        if (!compilePrograms(vu1Recomp, join(buildDir, "vu1"), all, shell))
+        if (!compilePrograms(vu1Recomp, join(buildDir, "vu1"), all, shell, elfArguments(portDir)))
         {
             if (cb.onLine)
                 cb.onLine("the VU1 compiler failed; the game keeps the programs it had");
@@ -946,6 +963,8 @@ namespace builder
                 recipe.learnPadScript = value;
             else if (section == "vu1" && key == "learn_frames")
                 recipe.learnFrames = value;
+            else if (section == "vu1" && key == "layout")
+                recipe.vuLayout = (manifest.parent_path() / value).string();
         }
 
         recipe.directory = manifest.parent_path().string();
@@ -1540,7 +1559,26 @@ namespace builder
         const std::string learned = join(learn, ".ps2x-learned");
         bool reuseCaptures = false;
         const std::vector<std::string> fromPlay = recordingsIn(playedDir(portDir));
-        if (fs::exists(learned, ec))
+        // Straight from the disc: the recipe's layout says which parts of the boot
+        // ELF the game uploads where, and every program in them is compiled now -
+        // no learn passes, and no slow first session. Recordings from play (and
+        // from passes an older build ran) are added; anything the layout misses is
+        // still recorded while playing and compiled when the game closes.
+        if (!recipe.vuLayout.empty() && fs::exists(recipe.vuLayout, ec))
+        {
+            writeFile(vuSourceFile(portDir), bootPath + "\n" + recipe.vuLayout + "\n");
+            std::vector<std::string> recordings = recordingsIn(learn);
+            recordings.insert(recordings.end(), fromPlay.begin(), fromPlay.end());
+            reuseCaptures = compilePrograms(vu1Recomp, vu1Dir, recordings,
+                                            [&](const std::vector<std::string> &argv) { return shell(argv, ""); },
+                                            elfArguments(portDir));
+            if (cb.onLine)
+                cb.onLine(reuseCaptures ? "compiled the VU programs from the game's own ELF, so no learn passes"
+                                        : "compiling from the ELF failed; the learn passes will run");
+            if (!reuseCaptures)
+                fs::remove(vuSourceFile(portDir), ec);
+        }
+        if (!reuseCaptures && fs::exists(learned, ec))
         {
             std::vector<std::string> captures = recordingsIn(learn);
             if (!captures.empty())
@@ -1584,7 +1622,7 @@ namespace builder
         if (reuseCaptures)
         {
             if (cb.onLine)
-                cb.onLine("the microprograms were compiled from the last build's recordings");
+                cb.onLine(fs::exists(vuSourceFile(portDir), ec) ? "the microprograms were compiled from the game's ELF" : "the microprograms were compiled from the last build's recordings");
         }
         else
         {

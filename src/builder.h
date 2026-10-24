@@ -48,6 +48,10 @@ namespace builder
         int learnPasses = 2;
         std::string learnPadScript;
         std::string learnFrames;
+        // games/<id>/<[vu1] layout>: which bytes of the boot ELF the game uploads to
+        // which VU addresses. With it the programs are compiled straight from the
+        // disc and the learn passes are not needed.
+        std::string vuLayout;
     };
 
     // games/<gameId>/game.toml when the source has one by that name (a source can

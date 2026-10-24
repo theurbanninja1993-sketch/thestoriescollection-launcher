@@ -2328,6 +2328,8 @@ int main(int argc, char **argv)
             const int index = jobGame;
             jobAway = Job::None;
             SetTargetFPS(60);
+            if (finished == Job::Game)
+                RestoreWindow(); // it stepped aside for the game; back now the game is gone
             SetWindowFocused();
             menuLit = 0.0f;
             if (finished == Job::Game)
@@ -3275,6 +3277,9 @@ int main(int argc, char **argv)
         {
             silenceThemes(games); // the game brings its own music
             startJob(Job::Game, selected, launchCommand(games[selected]), false);
+            // Out of the game's way. A fullscreen launcher otherwise keeps the top of
+            // the stack on Windows, and the game opens behind it with no way to reach it.
+            MinimizeWindow();
         }
 
         // ---------------------------------------------------------- draw

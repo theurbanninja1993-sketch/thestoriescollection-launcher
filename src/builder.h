@@ -103,6 +103,13 @@ namespace builder
     std::string syncSource(const std::string &incoming, const std::string &portDir, size_t &changed,
                            size_t &kept, size_t &removed);
 
+    // VU programs the game recorded while being played: it records every one it has
+    // no compiled version of, and those run interpreted, about ten times slower.
+    // optimize() moves the recordings into the build, compiles them with the rest
+    // and relinks the game - about a minute. False means the game is unchanged.
+    bool vuRecordingsPending(const std::string &portDir);
+    bool optimize(const std::string &portDir, const struct Callbacks &cb);
+
     // Whether this platform can run a build at all.
     bool supported();
     const char *unsupportedNote();

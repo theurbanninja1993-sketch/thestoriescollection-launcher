@@ -599,6 +599,152 @@ namespace builder
         }
     }
 
+    // ------------------------------------------------------------- recordings
+
+    namespace
+    {
+        // A recording of VU programs: vu1_learn_*.bin or vu0_learn_*.bin, from the
+        // build's passes or from play. vu1_recomp reads both units.
+        std::vector<std::string> recordingsIn(const std::string &dir)
+        {
+            std::vector<std::string> found;
+            std::error_code ec;
+            if (!fs::is_directory(dir, ec))
+                return found;
+            for (const fs::directory_entry &entry : fs::directory_iterator(dir, ec))
+            {
+                const std::string name = entry.path().filename().string();
+                if (entry.is_regular_file() && entry.file_size(ec) > 0 && entry.path().extension() == ".bin" &&
+                    (name.rfind("vu1_learn_", 0) == 0 || name.rfind("vu0_learn_", 0) == 0))
+                    found.push_back(entry.path().string());
+            }
+            std::sort(found.begin(), found.end());
+            return found;
+        }
+
+        // Where the game puts what it records while being played: its config folder,
+        // which is beside it when it runs portable and the user's otherwise.
+        std::vector<std::string> playedFolders(const std::string &portDir)
+        {
+            std::vector<std::string> folders = {join(portDir, "build/ps2xRuntime/config/vu_learn"),
+                                                join(portDir, "dist/windows/config/vu_learn"),
+                                                join(portDir, "dist/linux/config/vu_learn")};
+            if (const char *xdg = std::getenv("XDG_CONFIG_HOME"); xdg != nullptr && *xdg != '\0')
+                folders.push_back(std::string(xdg) + "/ps2recomp/vu_learn");
+            else if (const char *appData = std::getenv("APPDATA"); appData != nullptr && *appData != '\0')
+                folders.push_back(std::string(appData) + "/ps2recomp/vu_learn");
+            else if (const char *home = std::getenv("HOME"); home != nullptr && *home != '\0')
+                folders.push_back(std::string(home) + "/.config/ps2recomp/vu_learn");
+            return folders;
+        }
+
+        // Kept in the build folder, not in the learn passes' folder, which a full
+        // re-learn clears: these took playing to find.
+        std::string playedDir(const std::string &portDir) { return join(portDir, "build/vu_played"); }
+
+        // Compiles every recording into dir, through a scratch folder so a failure
+        // leaves the programs the build already has.
+        bool compilePrograms(const std::string &vu1Recomp, const std::string &dir,
+                             const std::vector<std::string> &recordings,
+                             const std::function<int(const std::vector<std::string> &)> &shell)
+        {
+            std::error_code ec;
+            const std::string scratch = dir + ".new";
+            fs::remove_all(scratch, ec);
+            fs::create_directories(scratch, ec);
+            std::vector<std::string> argv = {vu1Recomp, scratch};
+            argv.insert(argv.end(), recordings.begin(), recordings.end());
+            if (shell(argv) != 0 || !fs::exists(join(scratch, "vu1_programs.cpp"), ec))
+            {
+                fs::remove_all(scratch, ec);
+                return false;
+            }
+            fs::remove_all(dir, ec);
+            fs::rename(scratch, dir, ec);
+            return !ec;
+        }
+    }
+
+    bool vuRecordingsPending(const std::string &portDir)
+    {
+        for (const std::string &folder : playedFolders(portDir))
+            if (!recordingsIn(folder).empty())
+                return true;
+        return false;
+    }
+
+    bool optimize(const std::string &portDir, const Callbacks &cb)
+    {
+        std::error_code ec;
+        const std::string buildDir = join(portDir, "build");
+#if defined(_WIN32)
+        const std::string exe = ".exe";
+        std::string cmake = join(fs::path(portDir).parent_path().generic_string(),
+                                 "toolchains/cmake-3.31.6-windows-x86_64/bin/cmake.exe");
+        if (!fs::exists(cmake, ec))
+            cmake = "cmake";
+#else
+        const std::string exe;
+        const std::string cmake = "cmake";
+#endif
+        const std::string vu1Recomp = join(buildDir, "ps2xRuntime/vu1_recomp") + exe;
+        if (!fs::exists(vu1Recomp, ec) || !fs::exists(join(buildDir, "CMakeCache.txt"), ec))
+        {
+            if (cb.onLine)
+                cb.onLine("this game has not been built here, so there is nothing to add the programs to");
+            return false;
+        }
+        std::atomic<int> owned{0};
+        std::atomic<int> &pid = cb.childPid != nullptr ? *cb.childPid : owned;
+        auto shell = [&](const std::vector<std::string> &argv) { return runTool(argv, "", {}, cb.onLine, pid, 0); };
+
+        // Moved, not copied: the game records only programs it has no compiled
+        // version of, and once these are compiled it stops recording them.
+        const std::string played = playedDir(portDir);
+        fs::create_directories(played, ec);
+        size_t moved = 0;
+        for (const std::string &folder : playedFolders(portDir))
+        {
+            for (const std::string &file : recordingsIn(folder))
+            {
+                fs::rename(file, join(played, fs::path(file).filename().string()), ec);
+                if (ec)
+                {
+                    fs::copy_file(file, join(played, fs::path(file).filename().string()),
+                                  fs::copy_options::overwrite_existing, ec);
+                    fs::remove(file, ec);
+                }
+                ++moved;
+            }
+            fs::remove(join(folder, "PENDING"), ec);
+        }
+        if (cb.onLine)
+            cb.onLine(std::to_string(moved) + " new recording(s) from play");
+
+        std::vector<std::string> all = recordingsIn(join(buildDir, "vu1_learn"));
+        const std::vector<std::string> fromPlay = recordingsIn(played);
+        all.insert(all.end(), fromPlay.begin(), fromPlay.end());
+        if (!compilePrograms(vu1Recomp, join(buildDir, "vu1"), all, shell))
+        {
+            if (cb.onLine)
+                cb.onLine("the VU1 compiler failed; the game keeps the programs it had");
+            return false;
+        }
+        size_t programs = 0;
+        for (const fs::directory_entry &entry : fs::directory_iterator(join(buildDir, "vu1"), ec))
+            if (entry.path().filename().string().rfind("vu1p_", 0) == 0)
+                ++programs;
+        if (cb.onLine)
+            cb.onLine(std::to_string(programs) + " compiled program(s) now; relinking the game");
+        // The build globs the programs folder at build time, so a build picks up
+        // the new ones without configuring again.
+        const int status = shell({cmake, "--build", buildDir, "--target", "ps2EntryRunner", "-j",
+                                  std::to_string(cores())});
+        if (status != 0 && cb.onLine)
+            cb.onLine("relinking the game failed. Everything it printed is in the log.");
+        return status == 0;
+    }
+
     // ------------------------------------------------------------------ update
 
     std::string syncSource(const std::string &incoming, const std::string &portDir, size_t &changed,
@@ -1389,26 +1535,18 @@ namespace builder
         // longest part of a rebuild - are skipped. If that fails, the passes run.
         const std::string learned = join(learn, ".ps2x-learned");
         bool reuseCaptures = false;
+        const std::vector<std::string> fromPlay = recordingsIn(playedDir(portDir));
         if (fs::exists(learned, ec))
         {
-            std::vector<std::string> captures;
-            for (const fs::directory_entry &entry : fs::directory_iterator(learn, ec))
-            {
-                const std::string name = entry.path().filename().string();
-                if (entry.is_regular_file() && name.rfind("vu1_learn_", 0) == 0 && entry.path().extension() == ".bin")
-                    captures.push_back(entry.path().string());
-            }
-            std::sort(captures.begin(), captures.end());
+            std::vector<std::string> captures = recordingsIn(learn);
             if (!captures.empty())
             {
+                captures.insert(captures.end(), fromPlay.begin(), fromPlay.end());
                 if (cb.onLine)
                     cb.onLine("reusing " + std::to_string(captures.size()) +
-                              " VU1 recording(s) from the last build, so the passes can be skipped");
-                fs::remove_all(vu1Dir, ec);
-                fs::create_directories(vu1Dir, ec);
-                std::vector<std::string> recompiler = {vu1Recomp, vu1Dir};
-                recompiler.insert(recompiler.end(), captures.begin(), captures.end());
-                reuseCaptures = shell(recompiler, "") == 0 && fs::exists(join(vu1Dir, "vu1_programs.cpp"), ec);
+                              " VU recording(s) from earlier builds and play, so the passes can be skipped");
+                reuseCaptures = compilePrograms(vu1Recomp, vu1Dir, captures,
+                                                [&](const std::vector<std::string> &argv) { return shell(argv, ""); });
                 if (!reuseCaptures)
                 {
                     if (cb.onLine)
@@ -1555,13 +1693,13 @@ namespace builder
                 }
                 std::sort(captures.begin(), captures.end());
 
-                std::vector<std::string> recompiler = {vu1Recomp, vu1Dir};
-                recompiler.insert(recompiler.end(), captures.begin(), captures.end());
-                {
-                    const int status = shell(recompiler, "");
-                    if (status != 0)
-                        return failed("the VU1 compiler", status);
-                }
+                // With whatever playing has recorded so far, so a fresh learn does not
+                // throw away programs the passes never reach.
+                std::vector<std::string> recordings = captures;
+                recordings.insert(recordings.end(), fromPlay.begin(), fromPlay.end());
+                if (!compilePrograms(vu1Recomp, vu1Dir, recordings,
+                                     [&](const std::vector<std::string> &argv) { return shell(argv, ""); }))
+                    return failed("the VU1 compiler", 1);
                 if (!fs::exists(join(vu1Dir, "vu1_programs.cpp"), ec))
                 {
                     if (cb.onLine)

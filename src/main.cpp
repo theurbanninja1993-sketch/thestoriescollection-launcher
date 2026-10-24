@@ -254,46 +254,6 @@ namespace
 #endif
     }
 
-    // The recordings of VU microprograms the game made while being played, and the
-    // marker that says some are waiting to be compiled. The runtime records every
-    // program it meets that the build has no compiled version of - which is most of
-    // them, because a scripted build route only ever sees the intro - and everything
-    // uncompiled runs interpreted, about ten times slower.
-    //
-    // Two places, because the runtime uses the portable folder for a built game and
-    // the user's config folder when it is run from anywhere else.
-    std::vector<std::string> vuLearnMarkers(const std::string &portDir)
-    {
-        std::vector<std::string> markers;
-        markers.push_back(portDir + "/dist/" + platformFolder() + "/config/vu_learn/PENDING");
-        if (const char *home = std::getenv("HOME"))
-            markers.push_back(std::string(home) + "/.config/ps2recomp/vu_learn/PENDING");
-        return markers;
-    }
-
-    // The marker that exists, or "" if none does. Asked before drawing a card and
-    // before running anything, because a folder of recordings is worth a button and
-    // an empty one is worth nothing.
-    std::string pendingVuPrograms(const std::string &portDir)
-    {
-        for (const std::string &marker : vuLearnMarkers(portDir))
-        {
-            std::error_code ec;
-            if (std::filesystem::exists(marker, ec))
-                return marker;
-        }
-        return {};
-    }
-
-    // Compiling them: build.sh's own --optimize, in the port's folder so its default
-    // out and work are the ones its build used. It compiles every recording into the
-    // vu1_programs plugin beside the game, keeps the recordings for a later full
-    // rebuild to link in, and clears the marker.
-    std::string vuOptimizeCommand(const std::string &portDir)
-    {
-        return "cd \"" + portDir + "\" && bash build.sh --optimize";
-    }
-
     const char *launcherExeName()
     {
 #if defined(PS2X_LAUNCHER_WINDOWS)
@@ -1176,19 +1136,17 @@ int main(int argc, char **argv)
             std::printf("ps2x-launcher: %s has no source folder to optimize\n", game.id.c_str());
             return 1;
         }
-        const std::string marker = pendingVuPrograms(game.portDir);
-        if (marker.empty())
+        if (!builder::vuRecordingsPending(game.portDir))
         {
             std::printf("ps2x-launcher: nothing recorded for %s\n", game.id.c_str());
             return 1;
         }
-        std::printf("ps2x-launcher: optimizing %s (%s)\n", game.id.c_str(), marker.c_str());
-        std::vector<std::string> lines;
-        const int status = runCapturedAll(vuOptimizeCommand(game.portDir), lines);
-        for (const std::string &line : lines)
-            std::printf("  %s\n", line.c_str());
-        std::printf("ps2x-launcher: %s\n", status == 0 ? "done" : "failed");
-        return status == 0 ? 0 : 1;
+        std::printf("ps2x-launcher: optimizing %s\n", game.id.c_str());
+        builder::Callbacks callbacks;
+        callbacks.onLine = [](const std::string &line) { std::printf("  %s\n", line.c_str()); };
+        const bool ok = builder::optimize(game.portDir, callbacks);
+        std::printf("ps2x-launcher: %s\n", ok ? "done" : "failed");
+        return ok ? 0 : 1;
     }
 
     // --launch skips the menu entirely, so a desktop shortcut can start a game
@@ -1435,7 +1393,7 @@ int main(int argc, char **argv)
     // One background job at a time: the game, or fetching a port's source. Waiting
     // in a thread rather than blocking the loop is what lets the launcher keep
     // answering the window manager while it works, and notice the moment it ends.
-    enum class Job { None, Game, Fetch, Build, Launcher };
+    enum class Job { None, Game, Fetch, Build, Launcher, Optimize };
     std::atomic<int> jobKind{static_cast<int>(Job::None)};
     std::atomic<int> jobStatus{0};
     std::thread jobThread;
@@ -2075,6 +2033,34 @@ int main(int argc, char **argv)
         });
     };
 
+    // Compiling what a session recorded, on the job thread like a build, with what it
+    // says kept in logs/<game>-optimize.log.
+    auto startOptimize = [&](int index)
+    {
+        if (!beginJob(Job::Optimize, index))
+            return;
+        jobThread = std::thread([&, index]
+        {
+            const std::string logPath = base + "/logs/" + games[index].id + "-optimize.log";
+            std::error_code ec;
+            std::filesystem::create_directories(base + "/logs", ec);
+            auto log = std::make_shared<std::ofstream>(logPath, std::ios::binary | std::ios::trunc);
+            builder::Callbacks callbacks;
+            callbacks.childPid = &buildPid;
+            callbacks.onLine = [&, log](const std::string &line)
+            {
+                std::fprintf(stderr, "[optimize] %s\n", line.c_str());
+                if (*log)
+                    *log << line << "\n" << std::flush;
+                std::lock_guard<std::mutex> lock(jobMutex);
+                jobDetail = line;
+            };
+            const bool ok = builder::optimize(games[index].portDir, callbacks);
+            jobStatus = ok ? 0 : -1;
+            jobKind = static_cast<int>(Job::None);
+        });
+    };
+
     // What is drawn while the launcher is away from the menu. A game gets a black
     // screen because the game itself is about to cover it; a fetch has nothing
     // behind it, so it says what it is doing.
@@ -2087,6 +2073,28 @@ int main(int argc, char **argv)
         ClearBackground(kind == Job::Game ? BLACK : (Color){12, 13, 17, 255});
         if (jobGame < 0 || jobGame >= static_cast<int>(games.size()))
             return;
+
+        if (kind == Job::Optimize)
+        {
+            float y = h * 0.5f - 90.0f * fs;
+            drawCenteredLines(wrapText("Making " + games[jobGame].title + " faster", px(26), w * 0.8f), w * 0.5f, y,
+                              px(26), (Color){236, 240, 248, 255}, 34.0f * fs);
+            y += 56.0f * fs;
+            drawCenteredLines(wrapText("Compiling the graphics programs your last session ran the slow way. About a "
+                                       "minute, once: from the next session they run at full speed.",
+                                       px(17), w * 0.7f),
+                              w * 0.5f, y, px(17), (Color){126, 134, 152, 255}, 24.0f * fs);
+            y += 70.0f * fs;
+            std::string detail;
+            {
+                std::lock_guard<std::mutex> lock(jobMutex);
+                detail = jobDetail;
+            }
+            if (!detail.empty())
+                drawCenteredLines({wrapText(detail, px(16), w * 0.8f).back()}, w * 0.5f, y, px(16),
+                                  (Color){150, 158, 176, 255}, 22.0f * fs);
+            return;
+        }
 
         // Building. The list is the pipeline, and which line it is on is the honest
         // answer to "how long is this going to be".
@@ -2366,6 +2374,12 @@ int main(int argc, char **argv)
                     std::fprintf(stderr, "[launcher] %s exited with status %d\n", games[selected].id.c_str(), status);
                 if (!musicMuted)
                     startTheme(games[selected]);
+                // What the session ran interpreted, compiled now, so the next one runs
+                // it at full speed. Only for a game this launcher built: nothing else
+                // has a build folder to put the programs in.
+                if (index >= 0 && index < static_cast<int>(games.size()) && games[index].portConfigured &&
+                    builder::vuRecordingsPending(games[index].portDir))
+                    startOptimize(index);
             }
             else if (finished == Job::Build)
             {

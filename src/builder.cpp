@@ -773,8 +773,10 @@ namespace builder
         const bool folder = fs::is_directory(image, ec);
 #if defined(_WIN32)
         // Built here, natively: one compile and the passes, with no cross-compile after.
+        // Measured under Wine on a 20-thread desktop: the compiler fetch and the tools
+        // 1.5 minutes, the port 3.5, the two passes and their relinks 5. A laptop is slower.
         (void)windows;
-        return 4 + (folder ? 0 : 17) + 10 + 14;
+        return 4 + (folder ? 0 : 17) + 8 + 10;
 #endif
         int minutes = 3;             // configuring and building the tools
         if (windows)

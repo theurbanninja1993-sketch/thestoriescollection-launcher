@@ -87,11 +87,6 @@ assemble() {
 
     cp "$binary" "$dest/$binary_name"
 
-    # The Windows folder carries the Linux launcher as well, because the port is built
-    # by Linux: a Windows player runs that one in WSL, and having it in the same folder
-    # means the same launcher.ini and the same port/ - so the build it produces is the
-    # one this launcher plays. Without it the Windows build story is "download the
-    # other release too and work out which folder to be in", which is not a story.
     if [ -n "$extra_binary" ] && [ -f "$extra_binary" ]; then
         cp "$extra_binary" "$dest/$extra_name"
         chmod +x "$dest/$extra_name"
@@ -111,16 +106,12 @@ cannot be: what makes them is your own PlayStation 2 disc.
     1. Run the launcher.       Linux: ./ps2x_launcher     Windows: ps2x_launcher.exe
     2. Press U on a game.      Fetches that game's source. Source only, never a build.
     3. Press B on that game.   Builds it from your disc, and shows where it is up to.
-     On Windows the build is done by Linux, so run the Linux launcher - also in this
-     folder - inside WSL and press B there. In a terminal in this folder:
-
-         wsl --cd . ./ps2x_launcher
-
-     Same launcher.ini, same port/, and what it builds is the Windows port, which this
-     launcher plays. Fetching and playing need no WSL at all.
+     On Windows the first build fetches a compiler, CMake and Ninja (about
+     200 MB) into port\\toolchains. Nothing is installed on the system, and WSL
+     is not needed.
     4. Click it, or press Cross, to play.
 
-Step 3 wants a C++ toolchain and cmake and takes about twenty minutes. If the
+On Linux step 3 needs a C++ toolchain and cmake. It takes about twenty minutes. If the
 wizard cannot find your disc, put the image in the discs/ folder beside this file
 (an .iso, a .bin, a .cue sheet or a .chd all read), or insert the disc and press B
 again. A build can be stopped with Esc and started again, and whatever it printed
@@ -177,8 +168,7 @@ if [ $DO_WINDOWS -eq 1 ]; then
         -DLLVM_MINGW_ROOT="$TOOLCHAIN"
     run cmake --build "$ROOT/build-win" --target ps2x_launcher -j "$(nproc)"
     [ -f "$ROOT/build-win/ps2x_launcher.exe" ] || die "no .exe was produced"
-    assemble windows "$ROOT/build-win/ps2x_launcher.exe" ps2x_launcher.exe \
-        "$ROOT/build-release/ps2x_launcher" ps2x_launcher
+    assemble windows "$ROOT/build-win/ps2x_launcher.exe" ps2x_launcher.exe
 fi
 
 say "done"

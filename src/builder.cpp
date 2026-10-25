@@ -1545,6 +1545,15 @@ namespace builder
                 if (cb.onLine)
                     cb.onLine("the achievement set travels with the game");
             }
+            // The button-prompt art travels with the game too (games/<id>/prompts):
+            // the runner looks for it in prompts/ beside itself.
+            const std::string promptsSource = join(recipe.directory, "prompts");
+            if (fs::is_directory(promptsSource, setEc))
+            {
+                copyTree(promptsSource, join(portDir, "build/ps2xRuntime/prompts"));
+                if (cb.onLine)
+                    cb.onLine("the button-prompt art travels with the game");
+            }
             if (cb.onLine)
                 cb.onLine("copied " + std::to_string(copied) + ", left " + std::to_string(kept) + " alone");
         }
